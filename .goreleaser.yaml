@@ -1,0 +1,92 @@
+# .goreleaser.yaml
+project_name: fastbrew
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X fastbrew/cmd.Version={{.Version}}
+
+archives:
+  - format: tar.gz
+    # this name template makes the OS and Arch compatible with the results of uname.
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    # use zip for windows
+    format_overrides:
+    - goos: windows
+      format: zip
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  name_template: "{{ .Tag }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+
+# THIS SECTION GENERATES THE HOMEBREW FORMULA
+brews:
+  -
+    # Name of the formula
+    name: fastbrew
+
+    # GitHub repository to push the formula to
+    # You need to create a repo named "homebrew-tap" on GitHub
+    repository:
+      owner: kasyap1234
+      name: homebrew-tap
+      token: "{{ .Env.GITHUB_TOKEN }}"
+
+    # Template for the url which is determined by the given Token (github_token or gitlab_token)
+    url_template: "https://github.com/kasyap1234/fastbrew/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
+
+    # Git author used to commit to the repository.
+    commit_author:
+      name: goreleaserbot
+      email: goreleaser@carlosbecker.com
+
+    # Folder inside the repository to put the formula.
+    directory: Formula
+
+    # Homepage.
+    homepage: "https://github.com/kasyap1234/fastbrew"
+
+    # Description.
+    description: "A lightning-fast wrapper for Homebrew (Linuxbrew)"
+
+    # License.
+    license: "MIT"
+
+    # Dependencies
+    dependencies:
+      - name: git
+      # - name: brew # We assume brew is installed since this is a wrapper
+    
+    # Custom install instructions
+    install: |
+      bin.install "fastbrew"
+      # Install completions (optional, if we generate them)
+      # bash_completion.install "completions/fastbrew.bash" => "fastbrew"
+      # zsh_completion.install "completions/fastbrew.zsh" => "_fastbrew"
+      # fish_completion.install "completions/fastbrew.fish"
