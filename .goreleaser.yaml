@@ -7,7 +7,8 @@ before:
     - go mod tidy
 
 builds:
-  - env:
+  - id: default
+    env:
       - CGO_ENABLED=0
     goos:
       - linux
@@ -17,9 +18,21 @@ builds:
       - arm64
     ldflags:
       - -s -w -X fastbrew/cmd.Version={{.Version}}
+  - id: windows
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+      - 386
+    ldflags:
+      - -s -w -X fastbrew/cmd.Version={{.Version}}
 
 archives:
-  - id: default
+  - id: nix
+    builds:
+      - default
     format: tar.gz
     # this name template makes the OS and Arch compatible with the results of uname.
     name_template: >-
@@ -29,10 +42,9 @@ archives:
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}v{{ .Arm }}{{ end }}
-    goos:
-      - linux
-      - darwin
-  - id: windows
+  - id: win
+    builds:
+      - windows
     format: zip
     name_template: >-
       {{ .ProjectName }}_
@@ -41,8 +53,6 @@ archives:
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}v{{ .Arm }}{{ end }}
-    goos:
-      - windows
 
 checksum:
   name_template: 'checksums.txt'
