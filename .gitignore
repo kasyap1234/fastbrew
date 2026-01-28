@@ -1,0 +1,13 @@
+# Binaries
+fastbrew
+main
+
+# Goreleaser dist
+dist/
+
+# OS specific
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
