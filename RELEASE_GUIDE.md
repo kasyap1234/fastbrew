@@ -18,7 +18,7 @@
     git add .
     git commit -m "Initial commit"
     git branch -M main
-    git remote add origin https://github.com/YOUR_GITHUB_USERNAME/fastbrew.git
+    git remote add origin https://github.com/kasyap1234/fastbrew.git
     git push -u origin main
     ```
 
@@ -46,6 +46,6 @@
 Once released, users can install it using your custom tap:
 
 ```bash
-brew tap YOUR_GITHUB_USERNAME/tap
+brew tap kasyap1234/tap
 brew install fastbrew
 ```

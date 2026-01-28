@@ -5,7 +5,7 @@
 
 set -e
 
-REPO="fastbrew" # Placeholder, update with actual repo if hosted
+REPO="fastbrew" 
 VERSION="0.1.0"
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)

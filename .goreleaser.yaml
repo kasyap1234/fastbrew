@@ -51,8 +51,7 @@ brews:
     # Name of the formula
     name: fastbrew
 
-    # GitHub repository to push the formula to
-    # You need to create a repo named "homebrew-tap" on GitHub
+
     repository:
       owner: kasyap1234
       name: homebrew-tap
