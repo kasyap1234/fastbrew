@@ -1,6 +1,7 @@
 package brew
 
 import (
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,35 +17,30 @@ const (
 )
 
 type Formula struct {
-
 	Name         string        `json:"name"`
-
 	Desc         string        `json:"desc"`
-
 	Homepage     string        `json:"homepage"`
-
 	Version      string        `json:"version"`
-
 	Installed    []interface{} `json:"installed"`
-
 	Dependencies []string      `json:"dependencies"`
-
 }
 
-
-
-// Custom unmarshal might be needed if version is nested, but for search list, name/desc is key.
-
 type Cask struct {
-	Token       string `json:"token"`
-	Desc        string `json:"desc"`
-	Homepage    string `json:"homepage"`
-	Version     string `json:"version"`
+	Token    string `json:"token"`
+	Desc     string `json:"desc"`
+	Homepage string `json:"homepage"`
+	Version  string `json:"version"`
 }
 
 type Index struct {
 	Formulae []Formula
 	Casks    []Cask
+}
+
+type SearchItem struct {
+	Name   string
+	Desc   string
+	IsCask bool
 }
 
 func (c *Client) GetCacheDir() (string, error) {
@@ -59,40 +55,115 @@ func (c *Client) GetCacheDir() (string, error) {
 	return dir, nil
 }
 
+// LoadIndex ensures JSON files are present (downloads if needed) and parses them.
 func (c *Client) LoadIndex() (*Index, error) {
+	if err := c.EnsureFreshJSONs(); err != nil {
+		return nil, err
+	}
+	return c.LoadRawIndex()
+}
+
+// LoadRawIndex just parses the JSON files from disk
+func (c *Client) LoadRawIndex() (*Index, error) {
 	cacheDir, err := c.GetCacheDir()
 	if err != nil {
 		return nil, err
+	}
+	fPath := filepath.Join(cacheDir, "formula.json")
+	cPath := filepath.Join(cacheDir, "cask.json")
+
+	var idx Index
+	if err := loadJSON(fPath, &idx.Formulae); err != nil {
+		return nil, err
+	}
+	// Casks are optional
+	_ = loadJSON(cPath, &idx.Casks)
+	
+	return &idx, nil
+}
+
+func (c *Client) EnsureFreshJSONs() error {
+	cacheDir, err := c.GetCacheDir()
+	if err != nil {
+		return err
 	}
 
 	fPath := filepath.Join(cacheDir, "formula.json")
 	cPath := filepath.Join(cacheDir, "cask.json")
 
-	// Check if we need to update (older than 24h or missing)
 	if shouldUpdate(fPath) {
-		fmt.Println("🔄 Updating Formula index...") // This might mess up TUI if called inside. Should be separate.
+		fmt.Println("🔄 Updating Formula index...")
 		if err := downloadFile(FormulaAPI, fPath); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if shouldUpdate(cPath) {
 		fmt.Println("🔄 Updating Cask index...")
 		if err := downloadFile(CaskAPI, cPath); err != nil {
-			return nil, err
+			return err
+		}
+	}
+	return nil
+}
+
+// GetSearchIndex returns a simplified index, using a cached GOB file if available and fresh.
+func (c *Client) GetSearchIndex() ([]SearchItem, error) {
+	if err := c.EnsureFreshJSONs(); err != nil {
+		return nil, err
+	}
+
+	cacheDir, _ := c.GetCacheDir()
+	gobPath := filepath.Join(cacheDir, "search.gob")
+	fPath := filepath.Join(cacheDir, "formula.json")
+
+	// Fast path: load from gob
+	if isFresh(gobPath, fPath) {
+		f, err := os.Open(gobPath)
+		if err == nil {
+			defer f.Close()
+			var items []SearchItem
+			if err := gob.NewDecoder(f).Decode(&items); err == nil {
+				return items, nil
+			}
 		}
 	}
 
-	// Load
-	var idx Index
-	if err := loadJSON(fPath, &idx.Formulae); err != nil {
+	// Slow path: parse JSON and build gob
+	// We do this if gob is missing or stale
+	
+	idx, err := c.LoadRawIndex()
+	if err != nil {
 		return nil, err
 	}
-	if err := loadJSON(cPath, &idx.Casks); err != nil {
-		// Casks might fail if on Linux without Cask support or just optional
-		// ignore error or log
+
+	items := make([]SearchItem, 0, len(idx.Formulae)+len(idx.Casks))
+	for _, f := range idx.Formulae {
+		items = append(items, SearchItem{Name: f.Name, Desc: f.Desc, IsCask: false})
+	}
+	for _, c := range idx.Casks {
+		items = append(items, SearchItem{Name: c.Token, Desc: c.Desc, IsCask: true})
 	}
 
-	return &idx, nil
+	// Save GOB
+	f, err := os.Create(gobPath)
+	if err == nil {
+		defer f.Close()
+		gob.NewEncoder(f).Encode(items)
+	}
+
+	return items, nil
+}
+
+func isFresh(target, source string) bool {
+	tInfo, err := os.Stat(target)
+	if err != nil {
+		return false
+	}
+	sInfo, err := os.Stat(source)
+	if err != nil {
+		return false
+	}
+	return tInfo.ModTime().After(sInfo.ModTime())
 }
 
 func shouldUpdate(path string) bool {

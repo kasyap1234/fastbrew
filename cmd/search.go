@@ -20,7 +20,7 @@ var searchCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		idx, err := client.LoadIndex()
+		items, err := client.GetSearchIndex()
 		if err != nil {
 			fmt.Printf("Error loading index: %v\n", err)
 			os.Exit(1)
@@ -30,25 +30,17 @@ var searchCmd = &cobra.Command{
 		fmt.Printf("🔍 Searching for '%s'...\n", query)
 
 		count := 0
-		for _, f := range idx.Formulae {
-			if strings.Contains(strings.ToLower(f.Name), query) {
-				fmt.Printf("🍺 %s: %s\n", f.Name, f.Desc)
+		for _, item := range items {
+			if strings.Contains(strings.ToLower(item.Name), query) {
+				if item.IsCask {
+					fmt.Printf("🍷 %s: %s\n", item.Name, item.Desc)
+				} else {
+					fmt.Printf("🍺 %s: %s\n", item.Name, item.Desc)
+				}
 				count++
 			}
-			if count > 20 {
-				fmt.Println("... and more formulae")
-				break
-			}
-		}
-		
-		count = 0
-		for _, c := range idx.Casks {
-			if strings.Contains(strings.ToLower(c.Token), query) {
-				fmt.Printf("🍷 %s: %s\n", c.Token, c.Desc)
-				count++
-			}
-			if count > 20 {
-				fmt.Println("... and more casks")
+			if count > 40 {
+				fmt.Println("... and more results")
 				break
 			}
 		}

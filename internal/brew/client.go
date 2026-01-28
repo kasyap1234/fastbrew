@@ -14,14 +14,28 @@ type Client struct {
 }
 
 func NewClient() (*Client, error) {
-	// Try to find brew prefix
+	// 1. Check Env
+	if p := os.Getenv("HOMEBREW_PREFIX"); p != "" {
+		return &Client{Prefix: p}, nil
+	}
+
+	// 2. Check Standard Linux Path (Most likely for this user)
+	if _, err := os.Stat("/home/linuxbrew/.linuxbrew"); err == nil {
+		return &Client{Prefix: "/home/linuxbrew/.linuxbrew"}, nil
+	}
+
+	// 3. Check Standard Mac Paths
+	if _, err := os.Stat("/opt/homebrew"); err == nil {
+		return &Client{Prefix: "/opt/homebrew"}, nil
+	}
+	if _, err := os.Stat("/usr/local/Cellar"); err == nil {
+		return &Client{Prefix: "/usr/local"}, nil
+	}
+
+	// 4. Fallback to slow exec
 	cmd := exec.Command("brew", "--prefix")
 	out, err := cmd.Output()
 	if err != nil {
-		// Fallback for standard linux path if brew command fails/not in path
-		if _, err := os.Stat("/home/linuxbrew/.linuxbrew"); err == nil {
-			return &Client{Prefix: "/home/linuxbrew/.linuxbrew"}, nil
-		}
 		return nil, fmt.Errorf("could not find brew prefix: %w", err)
 	}
 	return &Client{Prefix: strings.TrimSpace(string(out))}, nil
