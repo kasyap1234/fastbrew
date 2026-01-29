@@ -18,7 +18,7 @@ var upgradeCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		if err := client.UpgradeParallel(args); err != nil {
+		if err := client.UpgradeNative(args); err != nil {
 			fmt.Printf("Error upgrading: %v\n", err)
 			os.Exit(1)
 		}

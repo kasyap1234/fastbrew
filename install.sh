@@ -1,41 +1,67 @@
 #!/bin/bash
-
 # FastBrew Installer
-# Usage: curl -sL https://raw.githubusercontent.com/yourusername/fastbrew/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/kasyap1234/fastbrew/main/install.sh | bash
 
 set -e
 
-REPO="fastbrew" 
-VERSION="0.1.0"
+REPO="kasyap1234/fastbrew"
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+
+# Detect OS and Architecture
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 
-if [ "$ARCH" == "x86_64" ]; then
-    ARCH="amd64"
-elif [ "$ARCH" == "aarch64" ]; then
-    ARCH="arm64"
-fi
+case "$OS" in
+    linux)  OS="Linux" ;;
+    darwin) OS="Darwin" ;;
+    *)      echo "❌ Unsupported OS: $OS"; exit 1 ;;
+esac
 
-echo "🚀 Installing FastBrew v${VERSION}..."
+case "$ARCH" in
+    x86_64)  ARCH="x86_64" ;;
+    aarch64) ARCH="arm64" ;;
+    arm64)   ARCH="arm64" ;;
+    *)       echo "❌ Unsupported architecture: $ARCH"; exit 1 ;;
+esac
 
-# In a real scenario, this would download from GitHub Releases.
-# For now, we'll simulate the build/install process or assume a binary URL.
+echo "🚀 Installing FastBrew..."
 
-echo "Downloading binary..."
-# URL="https://github.com/yourusername/fastbrew/releases/download/v${VERSION}/fastbrew_${OS}_${ARCH}.tar.gz"
-# curl -L $URL | tar xz
+# Get latest release version from GitHub API
+VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
 
-# Since we are local, let's just build it if go is installed, otherwise warn.
-if command -v go >/dev/null 2>&1; then
-    echo "Go found, building from source..."
-    go build -o fastbrew main.go
-else
-    echo "❌ Go not found. Please download the pre-compiled binary from the releases page."
+if [ -z "$VERSION" ]; then
+    echo "❌ Could not determine latest version"
     exit 1
 fi
 
-echo "Installing to /usr/local/bin..."
-sudo mv fastbrew /usr/local/bin/
+echo "📦 Version: v${VERSION}"
+echo "🖥️  Platform: ${OS}/${ARCH}"
 
-echo "✅ FastBrew installed!"
+# Construct download URL
+TARBALL="fastbrew_${OS}_${ARCH}.tar.gz"
+URL="https://github.com/${REPO}/releases/download/v${VERSION}/${TARBALL}"
+
+# Create temp directory
+TMP_DIR=$(mktemp -d)
+trap "rm -rf $TMP_DIR" EXIT
+
+# Download and extract
+echo "⬇️  Downloading from ${URL}..."
+curl -fsSL "$URL" -o "$TMP_DIR/$TARBALL"
+tar -xzf "$TMP_DIR/$TARBALL" -C "$TMP_DIR"
+
+# Install
+echo "📂 Installing to ${INSTALL_DIR}..."
+if [ -w "$INSTALL_DIR" ]; then
+    mv "$TMP_DIR/fastbrew" "$INSTALL_DIR/"
+else
+    sudo mv "$TMP_DIR/fastbrew" "$INSTALL_DIR/"
+fi
+
+chmod +x "$INSTALL_DIR/fastbrew"
+
+echo ""
+echo "✅ FastBrew v${VERSION} installed successfully!"
+echo ""
 echo "Try: fastbrew search python"
+echo "     fastbrew install cowsay"

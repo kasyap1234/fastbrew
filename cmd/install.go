@@ -20,7 +20,7 @@ var installCmd = &cobra.Command{
 		}
 
 		fmt.Printf("🚀 FastBrew installing: %v\n", args)
-		if err := client.InstallParallel(args); err != nil {
+		if err := client.InstallNative(args); err != nil {
 			fmt.Printf("Error installing packages: %v\n", err)
 			os.Exit(1)
 		}

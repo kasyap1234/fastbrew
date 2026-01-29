@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -78,8 +79,51 @@ func (c *Client) LoadRawIndex() (*Index, error) {
 	}
 	// Casks are optional
 	_ = loadJSON(cPath, &idx.Casks)
-	
+
 	return &idx, nil
+}
+
+// ForceRefreshIndex downloads fresh JSON files, regardless of cache age
+func (c *Client) ForceRefreshIndex() error {
+	cacheDir, err := c.GetCacheDir()
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("🔄 Refreshing package index...")
+
+	// Download in parallel
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := downloadFile(FormulaAPI, filepath.Join(cacheDir, "formula.json")); err != nil {
+			errCh <- err
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := downloadFile(CaskAPI, filepath.Join(cacheDir, "cask.json")); err != nil {
+			errCh <- err
+		}
+	}()
+	wg.Wait()
+	close(errCh)
+
+	if len(errCh) > 0 {
+		return <-errCh
+	}
+
+	// Rebuild GOB cache key by calling GetSearchIndex
+	// We delete the gob first to force rebuild
+	os.Remove(filepath.Join(cacheDir, "search.gob"))
+	if _, err := c.GetSearchIndex(); err != nil {
+		return fmt.Errorf("failed to rebuild search index: %w", err)
+	}
+
+	return nil
 }
 
 func (c *Client) EnsureFreshJSONs() error {
@@ -130,7 +174,7 @@ func (c *Client) GetSearchIndex() ([]SearchItem, error) {
 
 	// Slow path: parse JSON and build gob
 	// We do this if gob is missing or stale
-	
+
 	idx, err := c.LoadRawIndex()
 	if err != nil {
 		return nil, err

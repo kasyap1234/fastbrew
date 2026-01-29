@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -18,62 +19,100 @@ func (c *Client) Fetch(pkg string) error {
 	return cmd.Run()
 }
 
-// InstallParallel performs parallel fetch followed by install
-func (c *Client) InstallParallel(packages []string) error {
-	// 1. Resolve all dependencies (optional optimization, but brew install handles it)
-	// For MVP, we'll just fetch the requested packages in parallel. 
-	// To be truly effective, we should `brew deps` first.
+// InstallNative performs native installation by resolving deps, downloading bottles, and linking.
+func (c *Client) InstallNative(packages []string) error {
+	fmt.Println("🔍 Resolving dependencies from API...")
 
-	fmt.Println("🔍 Resolving dependencies...")
-	deps, err := c.ResolveDeps(packages)
-	if err != nil {
-		return fmt.Errorf("failed to resolve deps: %w", err)
+	visited := make(map[string]bool)
+	var installQueue []*RemoteFormula
+
+	// Recursive resolver
+	var resolve func(name string) error
+	resolve = func(name string) error {
+		if visited[name] {
+			return nil
+		}
+		visited[name] = true
+
+		if c.isInstalled(name) {
+			// Skip if installed?
+			// Check if we need to check deps of installed packages?
+			// For MVP, if installed, assume deps are satisfied or will be handled by brew doctor if broken.
+			return nil
+		}
+
+		f, err := c.FetchFormula(name)
+		if err != nil {
+			return err
+		}
+
+		for _, dep := range f.Dependencies {
+			if err := resolve(dep); err != nil {
+				return err
+			}
+		}
+
+		installQueue = append(installQueue, f)
+		return nil
 	}
-	
-	// Add original packages to the list to fetch
-	allToFetch := append(deps, packages...)
-	allToFetch = unique(allToFetch)
 
-	fmt.Printf("📦 Fetching %d packages in parallel...\n", len(allToFetch))
+	for _, pkg := range packages {
+		if err := resolve(pkg); err != nil {
+			return fmt.Errorf("dependency resolution failed for %s: %w", pkg, err)
+		}
+	}
 
-	// 2. Parallel Fetch
+	if len(installQueue) == 0 {
+		fmt.Println("✅ All packages already installed.")
+		return nil
+	}
+
+	fmt.Printf("📦 Found %d packages to install. Downloading in parallel...\n", len(installQueue))
+
+	// Parallel Download
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 5) // Limit to 5 concurrent downloads
-	errChan := make(chan error, len(allToFetch))
+	sem := make(chan struct{}, 10) // Concurrency limit
+	errChan := make(chan error, len(installQueue))
 
-	for _, pkg := range allToFetch {
+	for _, f := range installQueue {
 		wg.Add(1)
-		go func(p string) {
+		go func(frm *RemoteFormula) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			fmt.Printf("  ⬇️  Fetching %s...\n", p)
-			if err := c.Fetch(p); err != nil {
-				errChan <- fmt.Errorf("failed to fetch %s: %w", p, err)
-				fmt.Printf("  ❌ Failed %s\n", p)
+			if err := c.InstallBottle(frm); err != nil {
+				errChan <- fmt.Errorf("failed to install %s: %w", frm.Name, err)
+				fmt.Printf("  ❌ Failed %s: %v\n", frm.Name, err)
 			} else {
-				fmt.Printf("  ✅ Fetched %s\n", p)
+				fmt.Printf("  ✅ Extracted %s\n", frm.Name)
 			}
-		}(pkg)
+		}(f)
 	}
 	wg.Wait()
 	close(errChan)
 
-	// Check if any critical fetch failed? 
-	// Actually, `brew install` might still work if fetch failed (maybe it builds from source), 
-	// so we proceed but warn.
 	if len(errChan) > 0 {
-		fmt.Println("⚠️  Some downloads failed, falling back to standard install behavior.")
+		return fmt.Errorf("some installs failed, check output")
 	}
 
-	// 3. Install
-	fmt.Println("💿 Installing...")
-	args := append([]string{"install"}, packages...)
-	cmd := exec.Command("brew", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	// Sequential Link (safer)
+	fmt.Println("🔗 Linking binaries...")
+	for _, f := range installQueue {
+		if err := c.Link(f.Name, f.Versions.Stable); err != nil {
+			fmt.Printf("Error linking %s: %v\n", f.Name, err)
+		}
+	}
+
+	return nil
+}
+
+func (c *Client) isInstalled(name string) bool {
+	p := filepath.Join(c.Cellar, name)
+	if _, err := os.Stat(p); err == nil {
+		return true
+	}
+	return false
 }
 
 // ResolveDeps returns a list of recursive dependencies for the given packages using the cached Index
@@ -133,7 +172,7 @@ func (c *Client) UpgradeParallel(packages []string) error {
 	}
 
 	fmt.Printf("📦 Found %d packages to upgrade. Fetching in parallel...\n", len(outdated))
-	
+
 	// Use same parallel fetch logic as install
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 5)
