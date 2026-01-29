@@ -33,24 +33,22 @@ func (c *Client) InstallBottle(f *RemoteFormula) error {
 
 	fmt.Printf("  📦 Extracting %s...\n", f.Name)
 
-	// Determine install path (Cellar/name/version)
-	// We need to construct this carefully.
-	// Standard: {prefix}/Cellar/{name}/{version}
-
-	// Note: Client needs access to Cellar path. Adding it to Client struct is needed.
-	// For now assuming Client has Prefix and we derive Cellar from it if not explicit.
+	// Bottles contain: name/version/... at root
+	// So we extract directly to Cellar (NOT Cellar/name/version)
 	cellarPath := filepath.Join(c.Prefix, "Cellar")
-	if strings.Contains(c.Prefix, "Linuxbrew/Cellar") { // already points to cellar?
-		// handle edge cases later, assume standard layout
+
+	// Remove all existing version directories for this package to prevent permission errors
+	// Bottles may have revision suffixes like 20190702_1 that don't match API version
+	pkgDir := filepath.Join(cellarPath, f.Name)
+	if entries, err := os.ReadDir(pkgDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), f.Versions.Stable) {
+				os.RemoveAll(filepath.Join(pkgDir, entry.Name()))
+			}
+		}
 	}
 
-	destDir := filepath.Join(cellarPath, f.Name, f.Versions.Stable)
-
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return fmt.Errorf("failed to create cellar dir: %w", err)
-	}
-
-	if err := ExtractTarGz(tarPath, destDir); err != nil {
+	if err := ExtractTarGz(tarPath, cellarPath); err != nil {
 		return fmt.Errorf("extraction failed: %w", err)
 	}
 
