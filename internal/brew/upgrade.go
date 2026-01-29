@@ -2,6 +2,7 @@ package brew
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -35,10 +36,15 @@ func (c *Client) UpgradeNative(packages []string) error {
 				return // Skip on error
 			}
 
-			// Simple version check
-			// Ideally we should use semver parsing, but string inequality suffices for "something changed"
-			// Assuming remote.Versions.Stable is strictly newer or equal.
-			if remote.Versions.Stable != p.Version {
+			// Strip revision suffix from installed version for comparison
+			// Installed: 20190702_1, API: 20190702
+			installedBase := p.Version
+			if idx := strings.Index(p.Version, "_"); idx != -1 {
+				installedBase = p.Version[:idx]
+			}
+
+			// Compare base versions
+			if remote.Versions.Stable != installedBase {
 				mu.Lock()
 				outdated = append(outdated, remote)
 				mu.Unlock()
