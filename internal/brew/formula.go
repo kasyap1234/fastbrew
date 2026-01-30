@@ -53,7 +53,7 @@ func (c *Client) FetchFormula(name string) (*RemoteFormula, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 404 {
-		return nil, fmt.Errorf("formula %s not found on API", name)
+		return nil, fmt.Errorf("formula %q not found - try 'fastbrew search %s' to find the correct name (e.g., python@3.12 instead of python)", name, name)
 	}
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("api returned status %d for %s", resp.StatusCode, name)
