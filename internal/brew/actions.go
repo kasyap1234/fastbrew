@@ -14,8 +14,6 @@ import (
 // Fetch downloads the package bottle/source
 func (c *Client) Fetch(pkg string) error {
 	cmd := exec.Command("brew", "fetch", pkg)
-	// We might want to suppress output or stream it nicely.
-	// For now, let's just run it.
 	return cmd.Run()
 }
 
@@ -26,7 +24,6 @@ func (c *Client) InstallNative(packages []string) error {
 	visited := make(map[string]bool)
 	var installQueue []*RemoteFormula
 
-	// Recursive resolver
 	var resolve func(name string) error
 	resolve = func(name string) error {
 		if visited[name] {
@@ -35,9 +32,6 @@ func (c *Client) InstallNative(packages []string) error {
 		visited[name] = true
 
 		if c.isInstalled(name) {
-			// Skip if installed?
-			// Check if we need to check deps of installed packages?
-			// For MVP, if installed, assume deps are satisfied or will be handled by brew doctor if broken.
 			return nil
 		}
 
@@ -69,9 +63,8 @@ func (c *Client) InstallNative(packages []string) error {
 
 	fmt.Printf("📦 Found %d packages to install. Downloading in parallel...\n", len(installQueue))
 
-	// Parallel Download
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 10) // Concurrency limit
+	sem := make(chan struct{}, 10)
 	errChan := make(chan error, len(installQueue))
 
 	for _, f := range installQueue {
@@ -96,11 +89,149 @@ func (c *Client) InstallNative(packages []string) error {
 		return fmt.Errorf("some installs failed, check output")
 	}
 
-	// Sequential Link (safer)
 	fmt.Println("🔗 Linking binaries...")
+	if err := c.linkParallel(installQueue); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *Client) linkParallel(installQueue []*RemoteFormula) error {
+	const numWorkers = 5
+
+	conflictTracker := NewConflictTracker()
+
+	fmt.Println("  📋 Detecting conflicts...")
 	for _, f := range installQueue {
-		if err := c.Link(f.Name, f.Versions.Stable); err != nil {
-			fmt.Printf("Error linking %s: %v\n", f.Name, err)
+		result, err := c.LinkDryRun(f.Name, f.Versions.Stable)
+		if err != nil {
+			fmt.Printf("  ⚠️  Error checking %s: %v\n", f.Name, err)
+			continue
+		}
+
+		for _, binary := range result.Binaries {
+			if conflictPkg := conflictTracker.CheckAndTrack(binary, f.Name); conflictPkg != "" {
+				continue
+			}
+		}
+	}
+
+	conflictingPackages := conflictTracker.GetConflictingPackages()
+
+	var parallelQueue, sequentialQueue []*RemoteFormula
+	for _, f := range installQueue {
+		if conflictingPackages[f.Name] {
+			sequentialQueue = append(sequentialQueue, f)
+		} else {
+			parallelQueue = append(parallelQueue, f)
+		}
+	}
+
+	if len(parallelQueue) > 0 {
+		fmt.Printf("  ⚡ Linking %d packages in parallel...\n", len(parallelQueue))
+
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, numWorkers)
+		errorChan := make(chan error, len(parallelQueue))
+		resultChan := make(chan *LinkResult, len(parallelQueue))
+
+		for _, f := range parallelQueue {
+			wg.Add(1)
+			go func(frm *RemoteFormula) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				result, err := c.Link(frm.Name, frm.Versions.Stable)
+				if err != nil {
+					errorChan <- fmt.Errorf("failed to link %s: %w", frm.Name, err)
+					fmt.Printf("  ❌ Failed to link %s: %v\n", frm.Name, err)
+				} else {
+					resultChan <- result
+				}
+			}(f)
+		}
+
+		wg.Wait()
+		close(errorChan)
+		close(resultChan)
+
+		successCount := 0
+		for result := range resultChan {
+			if result.Success {
+				successCount++
+			}
+		}
+
+		if successCount > 0 {
+			fmt.Printf("  ✅ Linked %d packages in parallel\n", successCount)
+		}
+	}
+
+	if len(sequentialQueue) > 0 {
+		fmt.Printf("  🔄 Linking %d packages with conflicts sequentially...\n", len(sequentialQueue))
+
+		sequentialTracker := NewConflictTracker()
+
+		for binary, pkg := range conflictTracker.GetAllTrackedBinaries() {
+			if !conflictingPackages[pkg] {
+				sequentialTracker.CheckAndTrack(binary, pkg)
+			}
+		}
+
+		for _, f := range sequentialQueue {
+			result, err := c.Link(f.Name, f.Versions.Stable)
+			if err != nil {
+				fmt.Printf("  ❌ Failed to link %s: %v\n", f.Name, err)
+				continue
+			}
+
+			for _, binary := range result.Binaries {
+				if conflictPkg := sequentialTracker.CheckAndTrack(binary, f.Name); conflictPkg != "" {
+					fmt.Printf("  ⚠️  Binary '%s' already linked by package '%s', skipping '%s'\n",
+						binary, conflictPkg, f.Name)
+				}
+			}
+
+			if result.Success {
+				fmt.Printf("  ✅ Linked %s\n", f.Name)
+			}
+		}
+	}
+
+	conflicts := conflictTracker.GetConflicts()
+	if len(conflicts) > 0 {
+		fmt.Println("\n⚠️  Binary conflicts detected:")
+
+		// Group conflicts by binary
+		conflictsByBinary := make(map[string][]BinaryConflict)
+		for _, c := range conflicts {
+			conflictsByBinary[c.BinaryName] = append(conflictsByBinary[c.BinaryName], c)
+		}
+
+		for binary, conflictList := range conflictsByBinary {
+			packages := make(map[string]bool)
+			for _, c := range conflictList {
+				packages[c.FirstPkg] = true
+				packages[c.SecondPkg] = true
+			}
+
+			pkgList := make([]string, 0, len(packages))
+			for pkg := range packages {
+				pkgList = append(pkgList, pkg)
+			}
+
+			fmt.Printf("  • Binary '%s' - packages: %s\n", binary, strings.Join(pkgList, ", "))
+		}
+
+		fmt.Println("\n💡 To resolve conflicts, run:")
+		for binary, conflictList := range conflictsByBinary {
+			if len(conflictList) > 0 {
+				c := conflictList[0]
+				fmt.Printf("  • brew unlink %s && fastbrew link %s  (for binary '%s')\n",
+					c.FirstPkg, c.SecondPkg, binary)
+			}
 		}
 	}
 
@@ -122,7 +253,6 @@ func (c *Client) ResolveDeps(packages []string) ([]string, error) {
 		return nil, fmt.Errorf("failed to load index for dependency resolution: %w", err)
 	}
 
-	// Build a map for O(1) lookups
 	formulaMap := make(map[string]Formula)
 	for _, f := range idx.Formulae {
 		formulaMap[f.Name] = f
@@ -131,7 +261,6 @@ func (c *Client) ResolveDeps(packages []string) ([]string, error) {
 	visited := make(map[string]bool)
 	var deps []string
 
-	// Recursive resolver function
 	var resolve func(string)
 	resolve = func(name string) {
 		if visited[name] {
@@ -141,7 +270,6 @@ func (c *Client) ResolveDeps(packages []string) ([]string, error) {
 
 		f, exists := formulaMap[name]
 		if !exists {
-			// Might be a cask or system lib, skip for now
 			return
 		}
 
@@ -173,7 +301,6 @@ func (c *Client) UpgradeParallel(packages []string) error {
 
 	fmt.Printf("📦 Found %d packages to upgrade. Fetching in parallel...\n", len(outdated))
 
-	// Use same parallel fetch logic as install
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 5)
 	for _, pkg := range outdated {
@@ -204,9 +331,8 @@ func (c *Client) getOutdated(packages []string) ([]string, error) {
 	cmd := exec.Command("brew", args...)
 	out, err := cmd.Output()
 	if err != nil {
-		// brew outdated exits with 1 if there are outdated packages
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-			// carry on
+			_ = exitErr
 		} else {
 			return nil, err
 		}

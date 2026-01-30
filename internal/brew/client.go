@@ -6,11 +6,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 type Client struct {
-	Prefix string
-	Cellar string
+	Prefix      string
+	Cellar      string
+	Verbose     bool
+	prefixIndex *PrefixIndex
+	indexOnce   sync.Once
 }
 
 func NewClient() (*Client, error) {

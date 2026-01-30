@@ -4,29 +4,57 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
-// Link installs symlinks for the package binaries and other assets
-// This is a simplified version of `brew link`.
-// For MVP we focus on `bin/` linkage which is 90% of what users care about immediately.
-func (c *Client) Link(name, version string) error {
+type LinkResult struct {
+	Package  string
+	Binaries []string
+	Errors   []error
+	Success  bool
+}
+
+type BinaryConflict struct {
+	BinaryName string
+	FirstPkg   string
+	SecondPkg  string
+}
+
+func (c *Client) Link(name, version string) (*LinkResult, error) {
+	return c.linkInternal(name, version, false)
+}
+
+func (c *Client) LinkDryRun(name, version string) (*LinkResult, error) {
+	return c.linkInternal(name, version, true)
+}
+
+func (c *Client) linkInternal(name, version string, dryRun bool) (*LinkResult, error) {
 	cellarPath := filepath.Join(c.Prefix, "Cellar", name, version)
 	binDir := filepath.Join(cellarPath, "bin")
-
-	// Check if bin dir exists
-	if _, err := os.Stat(binDir); os.IsNotExist(err) {
-		return nil // No binaries to link, straightforward
+	result := &LinkResult{
+		Package:  name,
+		Binaries: make([]string, 0),
+		Success:  true,
 	}
 
-	// Target bin dir
+	if _, err := os.Stat(binDir); os.IsNotExist(err) {
+		return result, nil
+	}
+
 	targetBin := filepath.Join(c.Prefix, "bin")
-	if err := os.MkdirAll(targetBin, 0755); err != nil {
-		return err
+	if !dryRun {
+		if err := os.MkdirAll(targetBin, 0755); err != nil {
+			result.Success = false
+			result.Errors = append(result.Errors, err)
+			return result, err
+		}
 	}
 
 	entries, err := os.ReadDir(binDir)
 	if err != nil {
-		return err
+		result.Success = false
+		result.Errors = append(result.Errors, err)
+		return result, err
 	}
 
 	for _, entry := range entries {
@@ -37,35 +65,105 @@ func (c *Client) Link(name, version string) error {
 		src := filepath.Join(binDir, entry.Name())
 		dst := filepath.Join(targetBin, entry.Name())
 
-		// Remove existing link if it exists
+		result.Binaries = append(result.Binaries, entry.Name())
+
+		if dryRun {
+			continue
+		}
+
 		if _, err := os.Lstat(dst); err == nil {
 			os.Remove(dst)
 		}
 
-		// Create symlink
-		// Note: Homebrew uses relative symlinks usually, but absolute is safer for MVP
 		if err := os.Symlink(src, dst); err != nil {
-			fmt.Printf("⚠️  Failed to link %s: %v\n", entry.Name(), err)
-		} else {
-			// fmt.Printf("  🔗 Linked %s\n", entry.Name())
+			result.Errors = append(result.Errors, fmt.Errorf("failed to link %s: %w", entry.Name(), err))
+			result.Success = false
 		}
 	}
 
-	return nil
+	return result, nil
 }
 
-// Unlink removes symlinks for a package
+type ConflictTracker struct {
+	mu        sync.RWMutex
+	binaries  map[string]string
+	conflicts []BinaryConflict
+}
+
+func NewConflictTracker() *ConflictTracker {
+	return &ConflictTracker{
+		binaries:  make(map[string]string),
+		conflicts: make([]BinaryConflict, 0),
+	}
+}
+
+func (ct *ConflictTracker) CheckAndTrack(binary, pkg string) string {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	if existingPkg, exists := ct.binaries[binary]; exists {
+		if existingPkg != pkg {
+			ct.conflicts = append(ct.conflicts, BinaryConflict{
+				BinaryName: binary,
+				FirstPkg:   existingPkg,
+				SecondPkg:  pkg,
+			})
+		}
+		return existingPkg
+	}
+
+	ct.binaries[binary] = pkg
+	return ""
+}
+
+func (ct *ConflictTracker) GetConflicts() []BinaryConflict {
+	ct.mu.RLock()
+	defer ct.mu.RUnlock()
+
+	result := make([]BinaryConflict, len(ct.conflicts))
+	copy(result, ct.conflicts)
+	return result
+}
+
+func (ct *ConflictTracker) HasConflicts() bool {
+	ct.mu.RLock()
+	defer ct.mu.RUnlock()
+
+	return len(ct.conflicts) > 0
+}
+
+func (ct *ConflictTracker) GetConflictingPackages() map[string]bool {
+	ct.mu.RLock()
+	defer ct.mu.RUnlock()
+
+	result := make(map[string]bool)
+	for _, c := range ct.conflicts {
+		result[c.FirstPkg] = true
+		result[c.SecondPkg] = true
+	}
+	return result
+}
+
+func (ct *ConflictTracker) GetAllTrackedBinaries() map[string]string {
+	ct.mu.RLock()
+	defer ct.mu.RUnlock()
+
+	result := make(map[string]string)
+	for k, v := range ct.binaries {
+		result[k] = v
+	}
+	return result
+}
+
 func (c *Client) Unlink(name string) error {
-	// Find all versions of the package
 	pkgDir := filepath.Join(c.Cellar, name)
 	versions, err := os.ReadDir(pkgDir)
 	if err != nil {
-		return err // Package not found or error reading
+		return err
 	}
 
 	targetBin := filepath.Join(c.Prefix, "bin")
 
-	// For each version, find binaries and remove their symlinks
 	for _, vEntry := range versions {
 		if !vEntry.IsDir() {
 			continue
@@ -87,7 +185,6 @@ func (c *Client) Unlink(name string) error {
 			}
 
 			linkPath := filepath.Join(targetBin, bin.Name())
-			// Remove if it's a symlink pointing to this package
 			if info, err := os.Lstat(linkPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
 				os.Remove(linkPath)
 			}

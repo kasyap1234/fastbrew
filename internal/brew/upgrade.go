@@ -8,19 +8,16 @@ import (
 
 // UpgradeNative performs native upgrades using bottle installation
 func (c *Client) UpgradeNative(packages []string) error {
-	// 1. Get installed packages (native)
 	installed, err := c.ListInstalledNative()
 	if err != nil {
 		return err
 	}
 
-	// 2. Filter to requested packages (or all if empty)
 	toCheck := installed
 	if len(packages) > 0 {
 		toCheck = filterByNames(installed, packages)
 	}
 
-	// 3. Check each for updates (parallel API calls)
 	var outdated []*RemoteFormula
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -36,14 +33,11 @@ func (c *Client) UpgradeNative(packages []string) error {
 				return // Skip on error
 			}
 
-			// Strip revision suffix from installed version for comparison
-			// Installed: 20190702_1, API: 20190702
 			installedBase := p.Version
 			if idx := strings.Index(p.Version, "_"); idx != -1 {
 				installedBase = p.Version[:idx]
 			}
 
-			// Compare base versions
 			if remote.Versions.Stable != installedBase {
 				mu.Lock()
 				outdated = append(outdated, remote)
@@ -58,7 +52,6 @@ func (c *Client) UpgradeNative(packages []string) error {
 		return nil
 	}
 
-	// 4. Download and install new versions in parallel
 	fmt.Printf("📦 Found %d packages to upgrade.\n", len(outdated))
 
 	errChan := make(chan error, len(outdated))
@@ -88,12 +81,9 @@ func (c *Client) UpgradeNative(packages []string) error {
 		return fmt.Errorf("some upgrades failed, check output")
 	}
 
-	// 5. Link sequentially (safer for file system)
 	fmt.Println("🔗 Linking binaries...")
-	for _, f := range outdated {
-		if err := c.Link(f.Name, f.Versions.Stable); err != nil {
-			fmt.Printf("  ⚠️  Error linking %s: %v\n", f.Name, err)
-		}
+	if err := c.linkParallel(outdated); err != nil {
+		return err
 	}
 
 	return nil

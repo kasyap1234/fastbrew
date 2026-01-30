@@ -1,6 +1,7 @@
 package brew
 
 import (
+	"bytes"
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
@@ -13,8 +14,9 @@ import (
 )
 
 const (
-	FormulaAPI = "https://formulae.brew.sh/api/formula.json"
-	CaskAPI    = "https://formulae.brew.sh/api/cask.json"
+	FormulaAPI      = "https://formulae.brew.sh/api/formula.json"
+	CaskAPI         = "https://formulae.brew.sh/api/cask.json"
+	minCompressSize = 1024
 )
 
 type Formula struct {
@@ -56,7 +58,33 @@ func (c *Client) GetCacheDir() (string, error) {
 	return dir, nil
 }
 
-// LoadIndex ensures JSON files are present (downloads if needed) and parses them.
+func (c *Client) cleanupOldUncompressedFiles(cacheDir string) {
+	oldFiles := []string{"formula.json", "cask.json", "search.gob"}
+	for _, file := range oldFiles {
+		path := filepath.Join(cacheDir, file)
+		if _, err := os.Stat(path); err == nil {
+			zstPath := path + ".zst"
+			if _, err := os.Stat(zstPath); err == nil {
+				os.Remove(path)
+				if c.Verbose {
+					fmt.Printf("🧹 Cleaned up old uncompressed file: %s\n", file)
+				}
+			}
+		}
+	}
+}
+
+func compressFile(data []byte) ([]byte, error) {
+	if len(data) < minCompressSize {
+		return nil, fmt.Errorf("file too small to compress")
+	}
+	return compressWithPool(data), nil
+}
+
+func decompressFile(data []byte) ([]byte, error) {
+	return decompressWithPool(data)
+}
+
 func (c *Client) LoadIndex() (*Index, error) {
 	if err := c.EnsureFreshJSONs(); err != nil {
 		return nil, err
@@ -64,26 +92,26 @@ func (c *Client) LoadIndex() (*Index, error) {
 	return c.LoadRawIndex()
 }
 
-// LoadRawIndex just parses the JSON files from disk
 func (c *Client) LoadRawIndex() (*Index, error) {
 	cacheDir, err := c.GetCacheDir()
 	if err != nil {
 		return nil, err
 	}
-	fPath := filepath.Join(cacheDir, "formula.json")
-	cPath := filepath.Join(cacheDir, "cask.json")
+
+	c.cleanupOldUncompressedFiles(cacheDir)
+
+	fPath := filepath.Join(cacheDir, "formula.json.zst")
+	cPath := filepath.Join(cacheDir, "cask.json.zst")
 
 	var idx Index
 	if err := loadJSON(fPath, &idx.Formulae); err != nil {
 		return nil, err
 	}
-	// Casks are optional
 	_ = loadJSON(cPath, &idx.Casks)
 
 	return &idx, nil
 }
 
-// ForceRefreshIndex downloads fresh JSON files, regardless of cache age
 func (c *Client) ForceRefreshIndex() error {
 	cacheDir, err := c.GetCacheDir()
 	if err != nil {
@@ -92,20 +120,19 @@ func (c *Client) ForceRefreshIndex() error {
 
 	fmt.Println("🔄 Refreshing package index...")
 
-	// Download in parallel
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)
 
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if err := downloadFile(FormulaAPI, filepath.Join(cacheDir, "formula.json")); err != nil {
+		if err := c.downloadAndCompress(FormulaAPI, filepath.Join(cacheDir, "formula.json.zst"), "Formula"); err != nil {
 			errCh <- err
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		if err := downloadFile(CaskAPI, filepath.Join(cacheDir, "cask.json")); err != nil {
+		if err := c.downloadAndCompress(CaskAPI, filepath.Join(cacheDir, "cask.json.zst"), "Cask"); err != nil {
 			errCh <- err
 		}
 	}()
@@ -116,9 +143,10 @@ func (c *Client) ForceRefreshIndex() error {
 		return <-errCh
 	}
 
-	// Rebuild GOB cache key by calling GetSearchIndex
-	// We delete the gob first to force rebuild
-	os.Remove(filepath.Join(cacheDir, "search.gob"))
+	os.Remove(filepath.Join(cacheDir, "search.gob.zst"))
+	os.Remove(filepath.Join(cacheDir, "prefix_index.gob"))
+	c.prefixIndex = nil
+	c.indexOnce = sync.Once{}
 	if _, err := c.GetSearchIndex(); err != nil {
 		return fmt.Errorf("failed to rebuild search index: %w", err)
 	}
@@ -132,49 +160,88 @@ func (c *Client) EnsureFreshJSONs() error {
 		return err
 	}
 
-	fPath := filepath.Join(cacheDir, "formula.json")
-	cPath := filepath.Join(cacheDir, "cask.json")
+	fPath := filepath.Join(cacheDir, "formula.json.zst")
+	cPath := filepath.Join(cacheDir, "cask.json.zst")
 
 	if shouldUpdate(fPath) {
-		fmt.Println("🔄 Updating Formula index...")
-		if err := downloadFile(FormulaAPI, fPath); err != nil {
+		if c.Verbose {
+			fmt.Println("🔄 Updating Formula index...")
+		}
+		if err := c.downloadAndCompress(FormulaAPI, fPath, "Formula"); err != nil {
 			return err
 		}
 	}
 	if shouldUpdate(cPath) {
-		fmt.Println("🔄 Updating Cask index...")
-		if err := downloadFile(CaskAPI, cPath); err != nil {
+		if c.Verbose {
+			fmt.Println("🔄 Updating Cask index...")
+		}
+		if err := c.downloadAndCompress(CaskAPI, cPath, "Cask"); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// GetSearchIndex returns a simplified index, using a cached GOB file if available and fresh.
+func (c *Client) downloadAndCompress(url, path, label string) error {
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	originalSize := len(data)
+
+	compressed, err := compressFile(data)
+	if err != nil {
+		if err := os.WriteFile(path, data, 0644); err != nil {
+			return fmt.Errorf("failed to write file: %w", err)
+		}
+		if c.Verbose {
+			fmt.Printf("⚠️  %s index stored uncompressed (%d bytes)\n", label, originalSize)
+		}
+		return nil
+	}
+
+	if err := os.WriteFile(path, compressed, 0644); err != nil {
+		return fmt.Errorf("failed to write compressed file: %w", err)
+	}
+
+	if c.Verbose {
+		ratio := float64(originalSize-len(compressed)) / float64(originalSize) * 100
+		fmt.Printf("✅ %s index compressed: %d → %d bytes (%.1f%% reduction)\n",
+			label, originalSize, len(compressed), ratio)
+	}
+
+	return nil
+}
+
 func (c *Client) GetSearchIndex() ([]SearchItem, error) {
 	if err := c.EnsureFreshJSONs(); err != nil {
 		return nil, err
 	}
 
 	cacheDir, _ := c.GetCacheDir()
-	gobPath := filepath.Join(cacheDir, "search.gob")
-	fPath := filepath.Join(cacheDir, "formula.json")
+	gobPath := filepath.Join(cacheDir, "search.gob.zst")
+	prefixIndexPath := filepath.Join(cacheDir, "prefix_index.gob")
+	fPath := filepath.Join(cacheDir, "formula.json.zst")
 
-	// Fast path: load from gob
-	if isFresh(gobPath, fPath) {
-		f, err := os.Open(gobPath)
+	if isFresh(gobPath, fPath) && isFresh(prefixIndexPath, fPath) {
+		data, err := os.ReadFile(gobPath)
 		if err == nil {
-			defer f.Close()
-			var items []SearchItem
-			if err := gob.NewDecoder(f).Decode(&items); err == nil {
-				return items, nil
+			decompressed, err := decompressFile(data)
+			if err == nil {
+				var items []SearchItem
+				if err := gob.NewDecoder(bytes.NewReader(decompressed)).Decode(&items); err == nil {
+					return items, nil
+				}
 			}
 		}
 	}
-
-	// Slow path: parse JSON and build gob
-	// We do this if gob is missing or stale
-
 	idx, err := c.LoadRawIndex()
 	if err != nil {
 		return nil, err
@@ -184,18 +251,97 @@ func (c *Client) GetSearchIndex() ([]SearchItem, error) {
 	for _, f := range idx.Formulae {
 		items = append(items, SearchItem{Name: f.Name, Desc: f.Desc, IsCask: false})
 	}
-	for _, c := range idx.Casks {
-		items = append(items, SearchItem{Name: c.Token, Desc: c.Desc, IsCask: true})
+	for _, cask := range idx.Casks {
+		items = append(items, SearchItem{Name: cask.Token, Desc: cask.Desc, IsCask: true})
 	}
 
-	// Save GOB
-	f, err := os.Create(gobPath)
-	if err == nil {
-		defer f.Close()
-		gob.NewEncoder(f).Encode(items)
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(items); err == nil {
+		gobData := buf.Bytes()
+		if compressed, err := compressFile(gobData); err == nil {
+			if err := os.WriteFile(gobPath, compressed, 0644); err == nil && c.Verbose {
+				ratio := float64(len(gobData)-len(compressed)) / float64(len(gobData)) * 100
+				fmt.Printf("✅ Search index compressed: %d → %d bytes (%.1f%% reduction)\n",
+					len(gobData), len(compressed), ratio)
+			}
+		} else {
+			os.WriteFile(gobPath, gobData, 0644)
+		}
+	}
+
+	prefixIdx := NewPrefixIndex()
+	if err := prefixIdx.BuildIndex(items); err == nil {
+		if err := prefixIdx.Save(prefixIndexPath); err == nil && c.Verbose {
+			prefixCount, totalItems, avgBucket := prefixIdx.Stats()
+			fmt.Printf("✅ Prefix index built: %d prefixes, %d items, avg bucket %.1f\n",
+				prefixCount, totalItems, avgBucket)
+		}
 	}
 
 	return items, nil
+}
+
+func (c *Client) GetPrefixIndex() (*PrefixIndex, error) {
+	var err error
+	c.indexOnce.Do(func() {
+		cacheDir, _ := c.GetCacheDir()
+		prefixIndexPath := filepath.Join(cacheDir, "prefix_index.gob")
+		fPath := filepath.Join(cacheDir, "formula.json.zst")
+
+		c.prefixIndex = NewPrefixIndex()
+
+		if isFresh(prefixIndexPath, fPath) {
+			if loadErr := c.prefixIndex.Load(prefixIndexPath); loadErr == nil {
+				if c.Verbose {
+					prefixCount, totalItems, avgBucket := c.prefixIndex.Stats()
+					fmt.Printf("✅ Prefix index loaded: %d prefixes, %d items, avg bucket %.1f\n",
+						prefixCount, totalItems, avgBucket)
+				}
+				return
+			}
+		}
+
+		items, getErr := c.GetSearchIndex()
+		if getErr != nil {
+			err = getErr
+			return
+		}
+
+		if buildErr := c.prefixIndex.BuildIndex(items); buildErr != nil {
+			err = buildErr
+			return
+		}
+
+		if saveErr := c.prefixIndex.Save(prefixIndexPath); saveErr != nil && c.Verbose {
+			fmt.Printf("⚠️  Failed to save prefix index: %v\n", saveErr)
+		}
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return c.prefixIndex, nil
+}
+
+func (c *Client) SearchFuzzyWithIndex(query string) ([]SearchItem, error) {
+	prefixIdx, err := c.GetPrefixIndex()
+	if err != nil {
+		return nil, err
+	}
+
+	matches := prefixIdx.SearchFuzzy(query)
+	if matches == nil {
+		return []SearchItem{}, nil
+	}
+
+	items := prefixIdx.GetItems()
+	result := make([]SearchItem, len(matches))
+	for i, match := range matches {
+		result[i] = items[match.Index]
+	}
+
+	return result, nil
 }
 
 func isFresh(target, source string) bool {
@@ -218,6 +364,20 @@ func shouldUpdate(path string) bool {
 	return time.Since(info.ModTime()) > 24*time.Hour
 }
 
+func loadJSON(path string, v interface{}) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	decompressed, err := decompressFile(data)
+	if err != nil {
+		decompressed = data
+	}
+
+	return json.Unmarshal(decompressed, v)
+}
+
 func downloadFile(url, path string) error {
 	resp, err := http.Get(url)
 	if err != nil {
@@ -233,13 +393,4 @@ func downloadFile(url, path string) error {
 
 	_, err = io.Copy(out, resp.Body)
 	return err
-}
-
-func loadJSON(path string, v interface{}) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return json.NewDecoder(f).Decode(v)
 }
