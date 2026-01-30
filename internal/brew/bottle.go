@@ -237,23 +237,67 @@ func ExtractTarGz(tarPath, cellarDir string) error {
 		switch header.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, 0755); err != nil {
-				return err
+				return fmt.Errorf("failed to create directory %s: %w", target, err)
 			}
 		case tar.TypeReg:
 			dir := filepath.Dir(target)
 			if err := os.MkdirAll(dir, 0755); err != nil {
-				return err
+				return fmt.Errorf("failed to create directory for %s: %w", target, err)
 			}
-			outFile, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode))
+			outFile, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR|os.O_TRUNC, os.FileMode(header.Mode))
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to create file %s: %w", target, err)
 			}
 			if _, err := io.Copy(outFile, tr); err != nil {
 				outFile.Close()
-				return err
+				return fmt.Errorf("failed to write file %s: %w", target, err)
 			}
-			outFile.Close()
+			if err := outFile.Close(); err != nil {
+				return fmt.Errorf("failed to close file %s: %w", target, err)
+			}
+		case tar.TypeSymlink:
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return fmt.Errorf("failed to create directory for symlink %s: %w", target, err)
+			}
+			if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("failed to remove existing %s: %w", target, err)
+			}
+			linkTarget := header.Linkname
+			if !isSafeSymlink(cellarDir, target, linkTarget) {
+				return fmt.Errorf("unsafe symlink target %q for %s", linkTarget, header.Name)
+			}
+			if err := os.Symlink(linkTarget, target); err != nil {
+				return fmt.Errorf("failed to create symlink %s: %w", target, err)
+			}
+		case tar.TypeLink:
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return fmt.Errorf("failed to create directory for hard link %s: %w", target, err)
+			}
+			if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("failed to remove existing %s: %w", target, err)
+			}
+			linkTarget := filepath.Join(cellarDir, header.Linkname)
+			if !strings.HasPrefix(linkTarget, filepath.Clean(cellarDir)+string(os.PathSeparator)) {
+				return fmt.Errorf("illegal hard link target %q for %s", header.Linkname, header.Name)
+			}
+			if err := os.Link(linkTarget, target); err != nil {
+				return fmt.Errorf("failed to create hard link %s: %w", target, err)
+			}
+		case tar.TypeChar, tar.TypeBlock:
+			fmt.Printf("Warning: skipping device file %s\n", header.Name)
+		default:
+			if header.Typeflag != 0 {
+				fmt.Printf("Warning: skipping unsupported file type %d for %s\n", header.Typeflag, header.Name)
+			}
 		}
 	}
 	return nil
+}
+
+func isSafeSymlink(cellarDir, target, linkname string) bool {
+	if filepath.IsAbs(linkname) {
+		resolved := filepath.Join(filepath.Dir(target), linkname)
+		return strings.HasPrefix(resolved, filepath.Clean(cellarDir)+string(os.PathSeparator))
+	}
+	return true
 }
