@@ -12,3 +12,6 @@ dist/
 .vscode/
 .idea/
 .agent/
+
+# Temporary directories
+.sisyphus/
