@@ -2,9 +2,9 @@ package brew
 
 import (
 	"fmt"
+	"os/exec"
 	"runtime"
 	"strings"
-	"os/exec"
 )
 
 // GetPlatform returns the Homebrew-style platform string (e.g., "x86_64_linux", "arm64_sonoma")
@@ -49,25 +49,28 @@ func getMacOSVersion() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	
+
 	ver := strings.TrimSpace(string(out))
 	// Valid mappings as of 2026 (Homebrew convention)
 	// 14.x -> sonoma
 	// 13.x -> ventura
 	// 12.x -> monterey
 	// 11.x -> big_sur
-	
+
 	parts := strings.Split(ver, ".")
 	if len(parts) < 1 {
 		return "", fmt.Errorf("unknown mac version format: %s", ver)
 	}
-	
+
 	major := parts[0]
 	switch major {
+	case "26", "25", "24", "23", "22", "21", "20", "19", "18", "17":
+		// Future macOS versions - map to latest known for compatibility
+		return "sequoia", nil
 	case "16":
 		return "sequoia", nil
 	case "15":
-		return "sequoia", nil // Fallback/Current guess for 2025/2026
+		return "sequoia", nil
 	case "14":
 		return "sonoma", nil
 	case "13":
@@ -77,6 +80,6 @@ func getMacOSVersion() (string, error) {
 	case "11":
 		return "big_sur", nil
 	}
-	
+
 	return "", fmt.Errorf("unsupported macOS major version: %s", major)
 }
