@@ -6,6 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fastbrew/internal/httpclient"
+	"fastbrew/internal/progress"
+	"fastbrew/internal/resume"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,22 +26,23 @@ func (c *Client) InstallBottle(f *RemoteFormula) error {
 
 	fmt.Printf("  ⬇️  Downloading bottle for %s...\n", f.Name)
 
-	// Use cached download if valid
 	cacheDir, _ := c.GetCacheDir()
 	tarPath := filepath.Join(cacheDir, fmt.Sprintf("%s-%s.tar.gz", f.Name, f.Versions.Stable))
 
-	if err := c.DownloadAndVerify(bottleURL, tarPath, sha256Sum); err != nil {
+	var tracker progress.ProgressTracker
+	if c.ProgressManager != nil {
+		tracker = c.ProgressManager.Register(f.Name, bottleURL)
+		defer c.ProgressManager.Unregister(f.Name)
+	}
+
+	if err := c.DownloadWithProgress(bottleURL, tarPath, sha256Sum, tracker); err != nil {
 		return err
 	}
 
 	fmt.Printf("  📦 Extracting %s...\n", f.Name)
 
-	// Bottles contain: name/version/... at root
-	// So we extract directly to Cellar (NOT Cellar/name/version)
 	cellarPath := filepath.Join(c.Prefix, "Cellar")
 
-	// Remove all existing version directories for this package to prevent permission errors
-	// Bottles may have revision suffixes like 20190702_1 that don't match API version
 	pkgDir := filepath.Join(cellarPath, f.Name)
 	if entries, err := os.ReadDir(pkgDir); err == nil {
 		for _, entry := range entries {
@@ -57,43 +61,73 @@ func (c *Client) InstallBottle(f *RemoteFormula) error {
 
 // DownloadAndVerify downloads the file and checks generic SHA256
 func (c *Client) DownloadAndVerify(url, dest, expectedSHA string) error {
-	// 1. Check if exists and valid
+	return c.DownloadWithProgress(url, dest, expectedSHA, nil)
+}
+
+// DownloadWithProgress downloads a file with optional progress tracking and resume support
+func (c *Client) DownloadWithProgress(url, dest, expectedSHA string, tracker progress.ProgressTracker) error {
 	if _, err := os.Stat(dest); err == nil {
 		if verifyChecksum(dest, expectedSHA) == nil {
-			return nil // Already downloaded and valid
+			return nil
 		}
-		os.Remove(dest) // Invalid, re-download
+		os.Remove(dest)
 	}
 
-	out, err := os.Create(dest)
+	cacheDir, _ := c.GetCacheDir()
+	rm := resume.NewResumeManager(cacheDir)
+
+	var pd *resume.PartialDownload
+	var startByte int64
+
+	if rm.Exists(dest) {
+		var err error
+		pd, err = rm.Load(dest)
+		if err == nil && pd.URL == url && resume.CanResume(pd.State) {
+			if info, statErr := os.Stat(dest); statErr == nil {
+				startByte = info.Size()
+			}
+		} else {
+			rm.Delete(dest)
+			os.Remove(dest)
+			pd = nil
+		}
+	}
+
+	var out *os.File
+	var err error
+	if startByte > 0 {
+		out, err = os.OpenFile(dest, os.O_APPEND|os.O_WRONLY, 0644)
+	} else {
+		out, err = os.Create(dest)
+	}
 	if err != nil {
 		return err
 	}
 	defer out.Close()
 
-	// 2. Download with Auth Handling
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return err
 	}
 
-	// Create client
-	httpClient := &http.Client{}
+	if startByte > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", startByte))
+	}
 
+	httpClient := httpclient.Get()
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
 
-	// Handle 401 Unauthorized (GHCR needs token)
 	if resp.StatusCode == 401 {
 		authHeader := resp.Header.Get("Www-Authenticate")
 		if authHeader != "" {
-			token, err := getGHCRToken(authHeader)
-			if err != nil {
-				return fmt.Errorf("failed to get ghcr token: %w", err)
+			token, tokenErr := getGHCRToken(authHeader)
+			if tokenErr != nil {
+				resp.Body.Close()
+				return fmt.Errorf("failed to get ghcr token: %w", tokenErr)
 			}
-			// Retry with token
 			req.Header.Set("Authorization", "Bearer "+token)
 			resp.Body.Close()
 			resp, err = httpClient.Do(req)
@@ -104,19 +138,88 @@ func (c *Client) DownloadAndVerify(url, dest, expectedSHA string) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode == 200 && startByte > 0 {
+		out.Close()
+		out, err = os.Create(dest)
+		if err != nil {
+			return err
+		}
+		defer out.Close()
+		startByte = 0
+	}
+
+	if resp.StatusCode != 200 && resp.StatusCode != 206 {
 		return fmt.Errorf("download failed: %s", resp.Status)
 	}
 
-	if _, err := io.Copy(out, resp.Body); err != nil {
-		return err
+	totalSize := resp.ContentLength + startByte
+	if pd == nil {
+		pd, _ = rm.Create(url, dest)
 	}
-	out.Close() // Flush to disk
+	if pd != nil {
+		pd.TotalSize = totalSize
+		pd.ETag = resp.Header.Get("ETag")
+		pd.LastModified = resp.Header.Get("Last-Modified")
+		pd.UpdateState(resume.StateInProgress)
+		rm.Save(pd)
+	}
 
-	// Verify
+	if tracker != nil {
+		tracker.Start(totalSize)
+	}
+
+	buf := make([]byte, 32*1024)
+	downloaded := startByte
+
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := out.Write(buf[:n]); writeErr != nil {
+				if pd != nil {
+					pd.DownloadedBytes = downloaded
+					pd.UpdateState(resume.StateFailed)
+					rm.Save(pd)
+				}
+				return writeErr
+			}
+			downloaded += int64(n)
+
+			if tracker != nil {
+				tracker.Update(downloaded)
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			if pd != nil {
+				pd.DownloadedBytes = downloaded
+				pd.UpdateState(resume.StateFailed)
+				rm.Save(pd)
+			}
+			return readErr
+		}
+	}
+
+	out.Close()
+
 	if err := verifyChecksum(dest, expectedSHA); err != nil {
+		if pd != nil {
+			pd.UpdateState(resume.StateFailed)
+			rm.Save(pd)
+		}
 		os.Remove(dest)
 		return fmt.Errorf("checksum mismatch: %w", err)
+	}
+
+	if pd != nil {
+		pd.DownloadedBytes = downloaded
+		pd.UpdateState(resume.StateComplete)
+		rm.Delete(dest)
+	}
+
+	if tracker != nil {
+		tracker.Complete()
 	}
 
 	return nil
@@ -145,7 +248,7 @@ func getGHCRToken(authHeader string) (string, error) {
 	}
 
 	tokenURL := fmt.Sprintf("%s?service=%s&scope=%s", realm, service, scope)
-	resp, err := http.Get(tokenURL)
+	resp, err := httpclient.Get().Get(tokenURL)
 	if err != nil {
 		return "", err
 	}

@@ -1,7 +1,9 @@
 package brew
 
 import (
+	"context"
 	"encoding/json"
+	"fastbrew/internal/httpclient"
 	"fmt"
 	"net/http"
 	"time"
@@ -43,10 +45,17 @@ type BottleFile struct {
 func (c *Client) FetchFormula(name string) (*RemoteFormula, error) {
 	url := fmt.Sprintf("%s/%s.json", FormulaAPIURL, name)
 
-	// Create client with timeout
-	httpClient := &http.Client{Timeout: 10 * time.Second}
+	// Use shared HTTP client with request-specific timeout via context
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	resp, err := httpClient.Get(url)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request for %s: %w", name, err)
+	}
+
+	httpClient := httpclient.Get()
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch formula %s: %w", name, err)
 	}

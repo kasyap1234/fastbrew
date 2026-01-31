@@ -3,6 +3,8 @@ package brew
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"fastbrew/internal/retry"
 	"fmt"
 	"os"
 	"os/exec"
@@ -58,44 +60,105 @@ func (c *Client) InstallNative(packages []string) error {
 func (c *Client) installFormulae(packages []string) error {
 	fmt.Println("🔍 Resolving dependencies from API...")
 
-	visited := make(map[string]bool)
-	var installQueue []*RemoteFormula
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return fmt.Errorf("failed to load index: %w", err)
+	}
 
-	var resolve func(name string) error
-	resolve = func(name string) error {
-		if visited[name] {
-			return nil
+	formulaMap := make(map[string]Formula)
+	for _, f := range idx.Formulae {
+		formulaMap[f.Name] = f
+	}
+
+	needed := make(map[string]bool)
+	var collectNeeded func(name string)
+	collectNeeded = func(name string) {
+		if needed[name] || c.isInstalled(name) {
+			return
 		}
-		visited[name] = true
+		needed[name] = true
 
-		if c.isInstalled(name) {
-			return nil
-		}
-
-		f, err := c.FetchFormula(name)
-		if err != nil {
-			return err
-		}
-
-		for _, dep := range f.Dependencies {
-			if err := resolve(dep); err != nil {
-				return err
+		if f, ok := formulaMap[name]; ok {
+			for _, dep := range f.Dependencies {
+				collectNeeded(dep)
 			}
 		}
-
-		installQueue = append(installQueue, f)
-		return nil
 	}
 
 	for _, pkg := range packages {
-		if err := resolve(pkg); err != nil {
-			return fmt.Errorf("dependency resolution failed for %s: %w", pkg, err)
-		}
+		collectNeeded(pkg)
 	}
 
-	if len(installQueue) == 0 {
+	if len(needed) == 0 {
 		fmt.Println("✅ All formulae already installed.")
 		return nil
+	}
+
+	neededList := make([]string, 0, len(needed))
+	for name := range needed {
+		neededList = append(neededList, name)
+	}
+
+	fmt.Printf("📡 Fetching metadata for %d formulae in parallel...\n", len(neededList))
+
+	const maxWorkers = 10
+	type fetchResult struct {
+		formula *RemoteFormula
+		err     error
+	}
+
+	results := make(chan fetchResult, len(neededList))
+	fetchSem := make(chan struct{}, maxWorkers)
+	var fetchWg sync.WaitGroup
+
+	ctx := context.Background()
+	for _, name := range neededList {
+		fetchWg.Add(1)
+		go func(n string) {
+			defer fetchWg.Done()
+			fetchSem <- struct{}{}
+			defer func() { <-fetchSem }()
+
+			f, err := retry.WithResult(ctx, func() (*RemoteFormula, error) {
+				return c.FetchFormula(n)
+			})
+			results <- fetchResult{formula: f, err: err}
+		}(name)
+	}
+
+	fetchWg.Wait()
+	close(results)
+
+	formulaDetails := make(map[string]*RemoteFormula)
+	for res := range results {
+		if res.err != nil {
+			return fmt.Errorf("failed to fetch formula: %w", res.err)
+		}
+		formulaDetails[res.formula.Name] = res.formula
+	}
+
+	visited := make(map[string]bool)
+	var installQueue []*RemoteFormula
+	var buildQueue func(name string)
+	buildQueue = func(name string) {
+		if visited[name] || c.isInstalled(name) {
+			return
+		}
+		visited[name] = true
+
+		f := formulaDetails[name]
+		if f == nil {
+			return
+		}
+
+		for _, dep := range f.Dependencies {
+			buildQueue(dep)
+		}
+		installQueue = append(installQueue, f)
+	}
+
+	for _, pkg := range packages {
+		buildQueue(pkg)
 	}
 
 	fmt.Printf("📦 Found %d formulae to install. Downloading in parallel...\n", len(installQueue))

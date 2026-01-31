@@ -3,6 +3,7 @@ package brew
 import (
 	"bufio"
 	"bytes"
+	"fastbrew/internal/progress"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,11 +13,12 @@ import (
 )
 
 type Client struct {
-	Prefix      string
-	Cellar      string
-	Verbose     bool
-	prefixIndex *PrefixIndex
-	indexOnce   sync.Once
+	Prefix          string
+	Cellar          string
+	Verbose         bool
+	ProgressManager *progress.Manager
+	prefixIndex     *PrefixIndex
+	indexOnce       sync.Once
 }
 
 func NewClient() (*Client, error) {
@@ -126,4 +128,18 @@ func (c *Client) ListInstalledNative() ([]PackageInfo, error) {
 // ListInstalled returns a list of installed packages (Legacy wrapper pointing to Native)
 func (c *Client) ListInstalled() ([]PackageInfo, error) {
 	return c.ListInstalledNative()
+}
+
+func (c *Client) EnableProgress() {
+	if c.ProgressManager == nil {
+		c.ProgressManager = progress.NewManager()
+		c.ProgressManager.StartEventRouter()
+	}
+}
+
+func (c *Client) DisableProgress() {
+	if c.ProgressManager != nil {
+		c.ProgressManager.Close()
+		c.ProgressManager = nil
+	}
 }
