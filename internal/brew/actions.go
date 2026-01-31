@@ -18,7 +18,44 @@ func (c *Client) Fetch(pkg string) error {
 }
 
 // InstallNative performs native installation by resolving deps, downloading bottles, and linking.
+// Also handles cask installation via brew install --cask.
 func (c *Client) InstallNative(packages []string) error {
+	// Split packages into casks and formulae
+	var casks, formulae []string
+	for _, pkg := range packages {
+		isCask, _ := c.IsCask(pkg)
+		if isCask {
+			casks = append(casks, pkg)
+		} else {
+			formulae = append(formulae, pkg)
+		}
+	}
+
+	// Install formulae using native bottle installation
+	if len(formulae) > 0 {
+		if err := c.installFormulae(formulae); err != nil {
+			return err
+		}
+	}
+
+	// Install casks using brew install --cask
+	if len(casks) > 0 {
+		fmt.Printf("🍷 Installing casks: %v\n", casks)
+		args := append([]string{"install", "--cask"}, casks...)
+		cmd := exec.Command("brew", args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("cask installation failed: %w", err)
+		}
+		fmt.Println("✅ Casks installed successfully")
+	}
+
+	return nil
+}
+
+// installFormulae handles formula installation via bottles
+func (c *Client) installFormulae(packages []string) error {
 	fmt.Println("🔍 Resolving dependencies from API...")
 
 	visited := make(map[string]bool)
@@ -57,11 +94,11 @@ func (c *Client) InstallNative(packages []string) error {
 	}
 
 	if len(installQueue) == 0 {
-		fmt.Println("✅ All packages already installed.")
+		fmt.Println("✅ All formulae already installed.")
 		return nil
 	}
 
-	fmt.Printf("📦 Found %d packages to install. Downloading in parallel...\n", len(installQueue))
+	fmt.Printf("📦 Found %d formulae to install. Downloading in parallel...\n", len(installQueue))
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 10)
