@@ -261,3 +261,44 @@ func (m *LaunchdManager) IsUserService(plistPath string) bool {
 func (m *LaunchdManager) IsSystemService(plistPath string) bool {
 	return strings.HasPrefix(plistPath, "/Library/LaunchDaemons")
 }
+
+func (m *LaunchdManager) Start(serviceName string) error {
+	plistPath := m.findPlistPath(serviceName)
+	if plistPath == "" {
+		return ServiceNotFoundError{Name: serviceName}
+	}
+
+	_, err := m.runner.Run("launchctl", "load", "-w", plistPath)
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return LaunchctlError{Command: "load", Cause: err, Output: string(exitErr.Stderr)}
+		}
+		return LaunchctlError{Command: "load", Cause: err}
+	}
+	return nil
+}
+
+func (m *LaunchdManager) Stop(serviceName string) error {
+	plistPath := m.findPlistPath(serviceName)
+	if plistPath == "" {
+		return ServiceNotFoundError{Name: serviceName}
+	}
+
+	_, err := m.runner.Run("launchctl", "unload", plistPath)
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return LaunchctlError{Command: "unload", Cause: err, Output: string(exitErr.Stderr)}
+		}
+		return LaunchctlError{Command: "unload", Cause: err}
+	}
+	return nil
+}
+
+func (m *LaunchdManager) Restart(serviceName string) error {
+	if err := m.Stop(serviceName); err != nil {
+		if _, ok := err.(ServiceNotFoundError); ok {
+			return err
+		}
+	}
+	return m.Start(serviceName)
+}

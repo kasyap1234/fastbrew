@@ -227,6 +227,54 @@ func (m *SystemdManager) IsSystemService(servicePath string) bool {
 	return false
 }
 
+func (m *SystemdManager) Start(serviceName string) error {
+	servicePath := m.findServiceFilePath(serviceName)
+	if servicePath == "" {
+		return ServiceNotFoundError{Name: serviceName}
+	}
+
+	_, err := m.runner.Run("systemctl", "--user", "start", serviceName)
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return SystemctlError{Command: "start", Scope: "--user", Cause: err, Output: string(exitErr.Stderr)}
+		}
+		return SystemctlError{Command: "start", Scope: "--user", Cause: err}
+	}
+	return nil
+}
+
+func (m *SystemdManager) Stop(serviceName string) error {
+	servicePath := m.findServiceFilePath(serviceName)
+	if servicePath == "" {
+		return ServiceNotFoundError{Name: serviceName}
+	}
+
+	_, err := m.runner.Run("systemctl", "--user", "stop", serviceName)
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return SystemctlError{Command: "stop", Scope: "--user", Cause: err, Output: string(exitErr.Stderr)}
+		}
+		return SystemctlError{Command: "stop", Scope: "--user", Cause: err}
+	}
+	return nil
+}
+
+func (m *SystemdManager) Restart(serviceName string) error {
+	servicePath := m.findServiceFilePath(serviceName)
+	if servicePath == "" {
+		return ServiceNotFoundError{Name: serviceName}
+	}
+
+	_, err := m.runner.Run("systemctl", "--user", "restart", serviceName)
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return SystemctlError{Command: "restart", Scope: "--user", Cause: err, Output: string(exitErr.Stderr)}
+		}
+		return SystemctlError{Command: "restart", Scope: "--user", Cause: err}
+	}
+	return nil
+}
+
 // UserServicePathError indicates an error with the user service directory
 type UserServicePathError struct {
 	Path  string
