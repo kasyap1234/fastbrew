@@ -14,16 +14,21 @@ import (
 var docStyle = lipgloss.NewStyle().Margin(1, 2)
 
 type item struct {
-	title       string
-	desc        string
-	installed   bool
+	title     string
+	desc      string
+	installed bool
+	isCask    bool
 }
 
 func (i item) Title() string {
+	prefix := ""
 	if i.installed {
-		return "✅ " + i.title
+		prefix = "✅ "
 	}
-	return i.title
+	if i.isCask {
+		return prefix + "🍷 " + i.title
+	}
+	return prefix + i.title
 }
 func (i item) Description() string { return i.desc }
 func (i item) FilterValue() string { return i.title }
@@ -130,6 +135,7 @@ func (m model) updateListItems() tea.Cmd {
 			title:     f.Name,
 			desc:      f.Desc,
 			installed: m.installed[f.Name],
+			isCask:    false,
 		})
 	}
 	for _, c := range m.index.Casks {
@@ -137,6 +143,7 @@ func (m model) updateListItems() tea.Cmd {
 			title:     c.Token,
 			desc:      c.Desc,
 			installed: m.installed[c.Token],
+			isCask:    true,
 		})
 	}
 	cmd := m.list.SetItems(items)
