@@ -46,6 +46,20 @@ type SearchItem struct {
 	IsCask bool
 }
 
+// IsCask checks if a package name is a cask by looking it up in the index
+func (c *Client) IsCask(name string) (bool, error) {
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return false, err
+	}
+	for _, cask := range idx.Casks {
+		if cask.Token == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (c *Client) GetCacheDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {

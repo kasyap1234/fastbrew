@@ -1,6 +1,8 @@
 package brew
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -53,51 +55,71 @@ type PackageInfo struct {
 	Homepage    string `json:"homepage,omitempty"`
 	Installed   bool   `json:"installed"`
 	Version     string `json:"version"`
+	IsCask      bool   `json:"is_cask"`
 }
 
-// ListInstalledNative returns installed packages by scanning Cellar
+// ListInstalledNative returns installed packages by scanning Cellar and checking for casks
 func (c *Client) ListInstalledNative() ([]PackageInfo, error) {
-	if _, err := os.Stat(c.Cellar); os.IsNotExist(err) {
-		return []PackageInfo{}, nil // Cellar doesn't exist yet, empty list
-	}
-
-	entries, err := os.ReadDir(c.Cellar)
-	if err != nil {
-		return nil, err
-	}
-
 	var packages []PackageInfo
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
 
-		// Get version from subdirectory
-		versionsDir := filepath.Join(c.Cellar, name)
-		vEntries, err := os.ReadDir(versionsDir)
+	// 1. Get formulae from Cellar
+	if _, err := os.Stat(c.Cellar); err == nil {
+		entries, err := os.ReadDir(c.Cellar)
 		if err != nil {
-			continue
+			return nil, err
 		}
 
-		if len(vEntries) == 0 {
-			continue
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+
+			// Get version from subdirectory
+			versionsDir := filepath.Join(c.Cellar, name)
+			vEntries, err := os.ReadDir(versionsDir)
+			if err != nil {
+				continue
+			}
+
+			if len(vEntries) == 0 {
+				continue
+			}
+
+			// Find latest version directory
+			latestVer := vEntries[len(vEntries)-1].Name()
+
+			// Skip hidden/system files if any
+			if strings.HasPrefix(latestVer, ".") {
+				continue
+			}
+
+			packages = append(packages, PackageInfo{
+				Name:      name,
+				Version:   latestVer,
+				Installed: true,
+				IsCask:    false,
+			})
 		}
-
-		// Find latest version directory
-		latestVer := vEntries[len(vEntries)-1].Name()
-
-		// Skip hidden/system files if any
-		if strings.HasPrefix(latestVer, ".") {
-			continue
-		}
-
-		packages = append(packages, PackageInfo{
-			Name:      name,
-			Version:   latestVer,
-			Installed: true,
-		})
 	}
+
+	// 2. Get casks from brew list --cask
+	cmd := exec.Command("brew", "list", "--cask")
+	out, err := cmd.Output()
+	if err == nil {
+		scanner := bufio.NewScanner(bytes.NewReader(out))
+		for scanner.Scan() {
+			name := strings.TrimSpace(scanner.Text())
+			if name != "" {
+				packages = append(packages, PackageInfo{
+					Name:      name,
+					Installed: true,
+					IsCask:    true,
+				})
+			}
+		}
+	}
+
 	return packages, nil
 }
 
