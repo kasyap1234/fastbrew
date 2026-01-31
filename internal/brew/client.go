@@ -105,16 +105,26 @@ func (c *Client) ListInstalledNative() ([]PackageInfo, error) {
 		}
 	}
 
-	// 2. Get casks from brew list --cask
-	cmd := exec.Command("brew", "list", "--cask")
+	// 2. Get casks from brew list --cask --versions
+	cmd := exec.Command("brew", "list", "--cask", "--versions")
 	out, err := cmd.Output()
 	if err == nil {
 		scanner := bufio.NewScanner(bytes.NewReader(out))
 		for scanner.Scan() {
-			name := strings.TrimSpace(scanner.Text())
-			if name != "" {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			// Parse "name version" format
+			parts := strings.Fields(line)
+			if len(parts) >= 1 {
+				version := ""
+				if len(parts) >= 2 {
+					version = parts[1]
+				}
 				packages = append(packages, PackageInfo{
-					Name:      name,
+					Name:      parts[0],
+					Version:   version,
 					Installed: true,
 					IsCask:    true,
 				})
