@@ -17,8 +17,11 @@ type Client struct {
 	Cellar          string
 	Verbose         bool
 	ProgressManager *progress.Manager
-	prefixIndex     *PrefixIndex
+	index           *Index
+	indexErr        error
 	indexOnce       sync.Once
+	prefixIndex     *PrefixIndex
+	prefixIndexOnce sync.Once
 }
 
 func NewClient() (*Client, error) {

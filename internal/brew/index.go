@@ -100,10 +100,17 @@ func decompressFile(data []byte) ([]byte, error) {
 }
 
 func (c *Client) LoadIndex() (*Index, error) {
-	if err := c.EnsureFreshJSONs(); err != nil {
-		return nil, err
+	c.indexOnce.Do(func() {
+		if err := c.EnsureFreshJSONs(); err != nil {
+			c.indexErr = err
+			return
+		}
+		c.index, c.indexErr = c.LoadRawIndex()
+	})
+	if c.indexErr != nil {
+		return nil, c.indexErr
 	}
-	return c.LoadRawIndex()
+	return c.index, nil
 }
 
 func (c *Client) LoadRawIndex() (*Index, error) {
@@ -160,7 +167,10 @@ func (c *Client) ForceRefreshIndex() error {
 	os.Remove(filepath.Join(cacheDir, "search.gob.zst"))
 	os.Remove(filepath.Join(cacheDir, "prefix_index.gob"))
 	c.prefixIndex = nil
+	c.index = nil
+	c.indexErr = nil
 	c.indexOnce = sync.Once{}
+	c.prefixIndexOnce = sync.Once{}
 	if _, err := c.GetSearchIndex(); err != nil {
 		return fmt.Errorf("failed to rebuild search index: %w", err)
 	}
@@ -297,7 +307,7 @@ func (c *Client) GetSearchIndex() ([]SearchItem, error) {
 
 func (c *Client) GetPrefixIndex() (*PrefixIndex, error) {
 	var err error
-	c.indexOnce.Do(func() {
+	c.prefixIndexOnce.Do(func() {
 		cacheDir, _ := c.GetCacheDir()
 		prefixIndexPath := filepath.Join(cacheDir, "prefix_index.gob")
 		fPath := filepath.Join(cacheDir, "formula.json.zst")

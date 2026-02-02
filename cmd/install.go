@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fastbrew/internal/brew"
+	"fastbrew/internal/config"
 	"fastbrew/internal/progress"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 )
 
 var showProgress bool
+var installVerbose bool
 
 var installCmd = &cobra.Command{
 	Use:   "install [package...]",
@@ -22,6 +24,9 @@ var installCmd = &cobra.Command{
 			fmt.Printf("Error initializing brew client: %v\n", err)
 			os.Exit(1)
 		}
+
+		cfg := config.Get()
+		client.Verbose = installVerbose || cfg.Verbose
 
 		if showProgress {
 			client.EnableProgress()
@@ -63,5 +68,6 @@ func displayProgress(pm *progress.Manager) {
 
 func init() {
 	installCmd.Flags().BoolVarP(&showProgress, "progress", "p", false, "Show download progress")
+	installCmd.Flags().BoolVar(&installVerbose, "verbose", false, "Show detailed output (extraction timing, etc.)")
 	rootCmd.AddCommand(installCmd)
 }

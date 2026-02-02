@@ -1,7 +1,9 @@
 package brew
 
 import (
+	"context"
 	"encoding/json"
+	"fastbrew/internal/httpclient"
 	"fmt"
 	"net/http"
 	"strings"
@@ -29,8 +31,16 @@ type RemoteCask struct {
 func (c *Client) FetchCask(name string) (*RemoteCask, error) {
 	url := fmt.Sprintf("%s/%s.json", CaskAPIURL, name)
 
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	resp, err := httpClient.Get(url)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request for cask %s: %w", name, err)
+	}
+
+	httpClient := httpclient.Get()
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch cask %s: %w", name, err)
 	}
@@ -63,54 +73,111 @@ func (c *Client) GetOutdated() ([]OutdatedPackage, error) {
 		return []OutdatedPackage{}, nil
 	}
 
-	// 2. Check each package for updates in parallel
-	var outdated []OutdatedPackage
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-
-	for _, pkg := range installed {
-		wg.Add(1)
-		go func(p PackageInfo) {
-			defer wg.Done()
-
-			// Try to fetch as formula first
-			remote, err := c.FetchFormula(p.Name)
-			if err == nil {
-				// It's a formula - compare versions
-				installedBase := stripRevision(p.Version)
-				if remote.Versions.Stable != installedBase {
-					mu.Lock()
-					outdated = append(outdated, OutdatedPackage{
-						Name:           p.Name,
-						CurrentVersion: p.Version,
-						NewVersion:     remote.Versions.Stable,
-						IsCask:         false,
-					})
-					mu.Unlock()
-				}
-				return
-			}
-
-			// Try as cask
-			cask, err := c.FetchCask(p.Name)
-			if err == nil {
-				// It's a cask - compare versions
-				installedBase := stripRevision(p.Version)
-				if cask.Version != installedBase {
-					mu.Lock()
-					outdated = append(outdated, OutdatedPackage{
-						Name:           p.Name,
-						CurrentVersion: p.Version,
-						NewVersion:     cask.Version,
-						IsCask:         true,
-					})
-					mu.Unlock()
-				}
-			}
-		}(pkg)
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return nil, err
 	}
 
-	wg.Wait()
+	formulaVersions := make(map[string]string, len(idx.Formulae))
+	for _, f := range idx.Formulae {
+		formulaVersions[f.Name] = f.Version
+	}
+
+	caskVersions := make(map[string]string, len(idx.Casks))
+	for _, cask := range idx.Casks {
+		caskVersions[cask.Token] = cask.Version
+	}
+
+	// 2. Check each package against the cached index (fast path)
+	var outdated []OutdatedPackage
+	var unknown []PackageInfo
+
+	for _, pkg := range installed {
+		installedBase := stripRevision(pkg.Version)
+		if pkg.IsCask {
+			if latest, ok := caskVersions[pkg.Name]; ok {
+				if latest != installedBase {
+					outdated = append(outdated, OutdatedPackage{
+						Name:           pkg.Name,
+						CurrentVersion: pkg.Version,
+						NewVersion:     latest,
+						IsCask:         true,
+					})
+				}
+				continue
+			}
+			unknown = append(unknown, pkg)
+			continue
+		}
+
+		if latest, ok := formulaVersions[pkg.Name]; ok {
+			if latest != installedBase {
+				outdated = append(outdated, OutdatedPackage{
+					Name:           pkg.Name,
+					CurrentVersion: pkg.Version,
+					NewVersion:     latest,
+					IsCask:         false,
+				})
+			}
+			continue
+		}
+
+		unknown = append(unknown, pkg)
+	}
+
+	// 3. Fallback to remote lookups for packages not in the cached index
+	if len(unknown) > 0 {
+		const maxWorkers = 8
+		jobs := make(chan PackageInfo)
+		results := make(chan OutdatedPackage, len(unknown))
+		var wg sync.WaitGroup
+
+		worker := func() {
+			defer wg.Done()
+			for pkg := range jobs {
+				installedBase := stripRevision(pkg.Version)
+				if pkg.IsCask {
+					cask, err := c.FetchCask(pkg.Name)
+					if err == nil && cask.Version != installedBase {
+						results <- OutdatedPackage{
+							Name:           pkg.Name,
+							CurrentVersion: pkg.Version,
+							NewVersion:     cask.Version,
+							IsCask:         true,
+						}
+					}
+					continue
+				}
+
+				remote, err := c.FetchFormula(pkg.Name)
+				if err == nil && remote.Versions.Stable != installedBase {
+					results <- OutdatedPackage{
+						Name:           pkg.Name,
+						CurrentVersion: pkg.Version,
+						NewVersion:     remote.Versions.Stable,
+						IsCask:         false,
+					}
+				}
+			}
+		}
+
+		wg.Add(maxWorkers)
+		for i := 0; i < maxWorkers; i++ {
+			go worker()
+		}
+
+		for _, pkg := range unknown {
+			jobs <- pkg
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+
+		for pkg := range results {
+			outdated = append(outdated, pkg)
+		}
+	}
+
 	return outdated, nil
 }
 

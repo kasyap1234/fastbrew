@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // InstallBottle downloads and extracts a bottle for the given formula
@@ -52,8 +53,12 @@ func (c *Client) InstallBottle(f *RemoteFormula) error {
 		}
 	}
 
+	start := time.Now()
 	if err := ExtractTarGz(tarPath, cellarPath); err != nil {
 		return fmt.Errorf("extraction failed: %w", err)
+	}
+	if c.Verbose {
+		fmt.Printf("  ⏱️  Extracted %s in %s\n", f.Name, time.Since(start).Round(time.Millisecond))
 	}
 
 	return nil

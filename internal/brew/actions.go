@@ -22,11 +22,20 @@ func (c *Client) Fetch(pkg string) error {
 // InstallNative performs native installation by resolving deps, downloading bottles, and linking.
 // Also handles cask installation via brew install --cask.
 func (c *Client) InstallNative(packages []string) error {
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return err
+	}
+
+	caskSet := make(map[string]struct{}, len(idx.Casks))
+	for _, cask := range idx.Casks {
+		caskSet[cask.Token] = struct{}{}
+	}
+
 	// Split packages into casks and formulae
 	var casks, formulae []string
 	for _, pkg := range packages {
-		isCask, _ := c.IsCask(pkg)
-		if isCask {
+		if _, ok := caskSet[pkg]; ok {
 			casks = append(casks, pkg)
 		} else {
 			formulae = append(formulae, pkg)
@@ -35,7 +44,7 @@ func (c *Client) InstallNative(packages []string) error {
 
 	// Install formulae using native bottle installation
 	if len(formulae) > 0 {
-		if err := c.installFormulae(formulae); err != nil {
+		if err := c.installFormulaeWithIndex(formulae, idx); err != nil {
 			return err
 		}
 	}
@@ -57,13 +66,8 @@ func (c *Client) InstallNative(packages []string) error {
 }
 
 // installFormulae handles formula installation via bottles
-func (c *Client) installFormulae(packages []string) error {
+func (c *Client) installFormulaeWithIndex(packages []string, idx *Index) error {
 	fmt.Println("🔍 Resolving dependencies from API...")
-
-	idx, err := c.LoadIndex()
-	if err != nil {
-		return fmt.Errorf("failed to load index: %w", err)
-	}
 
 	formulaMap := make(map[string]Formula)
 	for _, f := range idx.Formulae {
@@ -195,6 +199,15 @@ func (c *Client) installFormulae(packages []string) error {
 	}
 
 	return nil
+}
+
+// installFormulae handles formula installation via bottles
+func (c *Client) installFormulae(packages []string) error {
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return fmt.Errorf("failed to load index: %w", err)
+	}
+	return c.installFormulaeWithIndex(packages, idx)
 }
 
 func (c *Client) linkParallel(installQueue []*RemoteFormula) error {
