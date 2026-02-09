@@ -16,12 +16,20 @@ type Client struct {
 	Prefix          string
 	Cellar          string
 	Verbose         bool
+	MaxParallel     int
 	ProgressManager *progress.Manager
 	index           *Index
 	indexErr        error
 	indexOnce       sync.Once
 	prefixIndex     *PrefixIndex
 	prefixIndexOnce sync.Once
+}
+
+func (c *Client) getMaxParallel() int {
+	if c.MaxParallel <= 0 {
+		return 4
+	}
+	return c.MaxParallel
 }
 
 func NewClient() (*Client, error) {

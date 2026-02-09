@@ -41,6 +41,10 @@ func DoWithConfig(ctx context.Context, cfg Config, fn func() error) error {
 				break
 			}
 
+			if !IsRetryable(err) {
+				return err
+			}
+
 			jitter := time.Duration(float64(delay) * cfg.JitterFactor * (rand.Float64()*2 - 1))
 			sleepDuration := delay + jitter
 

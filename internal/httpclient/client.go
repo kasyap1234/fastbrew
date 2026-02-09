@@ -41,11 +41,6 @@ func createClient() *http.Client {
 		},
 	}
 
-	transport.RegisterProtocol("http", &http.Transport{
-		MaxIdleConns:        DefaultConfig.MaxIdleConns,
-		MaxIdleConnsPerHost: DefaultConfig.MaxIdleConnsPerHost,
-	})
-
 	return &http.Client{
 		Transport: transport,
 		Timeout:   120 * time.Second,

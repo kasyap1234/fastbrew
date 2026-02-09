@@ -168,7 +168,7 @@ func (c *Client) installFormulaeWithIndex(packages []string, idx *Index) error {
 	fmt.Printf("📦 Found %d formulae to install. Downloading in parallel...\n", len(installQueue))
 
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 10)
+	sem := make(chan struct{}, c.getMaxParallel())
 	errChan := make(chan error, len(installQueue))
 
 	for _, f := range installQueue {
@@ -189,12 +189,43 @@ func (c *Client) installFormulaeWithIndex(packages []string, idx *Index) error {
 	wg.Wait()
 	close(errChan)
 
-	if len(errChan) > 0 {
-		return fmt.Errorf("some installs failed, check output")
+	var installErrors []error
+	for err := range errChan {
+		installErrors = append(installErrors, err)
+	}
+	if len(installErrors) > 0 {
+		for _, e := range installErrors {
+			fmt.Printf("  ⚠️  %v\n", e)
+		}
+		return fmt.Errorf("%d package(s) failed to install", len(installErrors))
+	}
+
+	var linkQueue []*RemoteFormula
+	var kegOnlyQueue []*RemoteFormula
+	for _, f := range installQueue {
+		if f.KegOnly {
+			kegOnlyQueue = append(kegOnlyQueue, f)
+		} else {
+			linkQueue = append(linkQueue, f)
+		}
+	}
+
+	for _, f := range kegOnlyQueue {
+		optDir := filepath.Join(c.Prefix, "opt")
+		optLink := filepath.Join(optDir, f.Name)
+		os.MkdirAll(optDir, 0755)
+		if existing, err := os.Lstat(optLink); err == nil {
+			if existing.Mode()&os.ModeSymlink != 0 {
+				os.Remove(optLink)
+			}
+		}
+		cellarPath := filepath.Join(c.Prefix, "Cellar", f.Name, f.Versions.Stable)
+		os.Symlink(cellarPath, optLink)
+		fmt.Printf("  🔗 %s (keg-only) → opt/%s\n", f.Name, f.Name)
 	}
 
 	fmt.Println("🔗 Linking binaries...")
-	if err := c.linkParallel(installQueue); err != nil {
+	if err := c.linkParallel(linkQueue); err != nil {
 		return err
 	}
 
@@ -415,7 +446,8 @@ func (c *Client) UpgradeParallel(packages []string) error {
 	fmt.Printf("📦 Found %d packages to upgrade. Fetching in parallel...\n", len(outdated))
 
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 5)
+	sem := make(chan struct{}, c.getMaxParallel())
+	fetchErrChan := make(chan error, len(outdated))
 	for _, pkg := range outdated {
 		wg.Add(1)
 		go func(p string) {
@@ -423,10 +455,17 @@ func (c *Client) UpgradeParallel(packages []string) error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			fmt.Printf("  ⬇️  Fetching update for %s...\n", p)
-			c.Fetch(p)
+			if err := c.Fetch(p); err != nil {
+				fetchErrChan <- fmt.Errorf("failed to fetch %s: %w", p, err)
+			}
 		}(pkg)
 	}
 	wg.Wait()
+	close(fetchErrChan)
+
+	for err := range fetchErrChan {
+		return err
+	}
 
 	fmt.Println("💿 Upgrading...")
 	args := append([]string{"upgrade"}, outdated...)

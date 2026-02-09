@@ -79,6 +79,13 @@ func (c *Client) upgradeFormulae(outdated []OutdatedPackage) error {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
+	type fetchErr struct {
+		name string
+		err  error
+	}
+	var fetchErrors []fetchErr
+	var errMu sync.Mutex
+
 	fmt.Printf("🔍 Fetching formula metadata for %d package(s)...\n", len(outdated))
 
 	for _, pkg := range outdated {
@@ -87,6 +94,9 @@ func (c *Client) upgradeFormulae(outdated []OutdatedPackage) error {
 			defer wg.Done()
 			remote, err := c.FetchFormula(p.Name)
 			if err != nil {
+				errMu.Lock()
+				fetchErrors = append(fetchErrors, fetchErr{name: p.Name, err: err})
+				errMu.Unlock()
 				return
 			}
 			mu.Lock()
@@ -96,6 +106,12 @@ func (c *Client) upgradeFormulae(outdated []OutdatedPackage) error {
 	}
 	wg.Wait()
 
+	if len(fetchErrors) > 0 {
+		for _, fe := range fetchErrors {
+			fmt.Printf("  ⚠️  Failed to fetch metadata for %s: %v\n", fe.name, fe.err)
+		}
+	}
+
 	if len(outdatedFormulae) == 0 {
 		return nil
 	}
@@ -103,7 +119,7 @@ func (c *Client) upgradeFormulae(outdated []OutdatedPackage) error {
 	fmt.Printf("📦 Upgrading %d formulae...\n", len(outdatedFormulae))
 
 	errChan := make(chan error, len(outdatedFormulae))
-	sem := make(chan struct{}, 10)
+	sem := make(chan struct{}, c.getMaxParallel())
 
 	fmt.Println("⬇️  Downloading bottles in parallel...")
 	for _, f := range outdatedFormulae {
@@ -125,8 +141,15 @@ func (c *Client) upgradeFormulae(outdated []OutdatedPackage) error {
 	wg.Wait()
 	close(errChan)
 
-	if len(errChan) > 0 {
-		return fmt.Errorf("some upgrades failed, check output")
+	var installErrors []error
+	for err := range errChan {
+		installErrors = append(installErrors, err)
+	}
+	if len(installErrors) > 0 {
+		for _, e := range installErrors {
+			fmt.Printf("  ⚠️  %v\n", e)
+		}
+		return fmt.Errorf("%d package(s) failed to upgrade", len(installErrors))
 	}
 
 	fmt.Println("🔗 Linking binaries...")

@@ -64,6 +64,14 @@ type baseTracker struct {
 	mu       sync.RWMutex
 }
 
+func (t *baseTracker) trySend(event ProgressEvent) {
+	defer func() { recover() }()
+	select {
+	case t.events <- event:
+	default:
+	}
+}
+
 // NewProgressTracker creates a new ProgressTracker instance
 func NewProgressTracker(id, url string, events chan<- ProgressEvent) ProgressTracker {
 	return &baseTracker{
@@ -86,13 +94,13 @@ func (t *baseTracker) Start(total int64) {
 	t.progress.StartedAt = time.Now()
 	t.progress.UpdatedAt = time.Now()
 
-	t.events <- ProgressEvent{
+	t.trySend(ProgressEvent{
 		Type:    EventDownloadStart,
 		ID:      t.id,
 		Message: "Download started",
 		Current: 0,
 		Total:   total,
-	}
+	})
 }
 
 // Update updates the current progress
@@ -117,13 +125,13 @@ func (t *baseTracker) Update(current int64) {
 	t.progress.DownloadedBytes = current
 	t.progress.UpdatedAt = now
 
-	t.events <- ProgressEvent{
+	t.trySend(ProgressEvent{
 		Type:    EventDownloadProgress,
 		ID:      t.id,
 		Message: "Downloading...",
 		Current: current,
 		Total:   t.progress.TotalBytes,
-	}
+	})
 }
 
 // Complete marks the download as successfully completed
@@ -134,13 +142,13 @@ func (t *baseTracker) Complete() {
 	t.progress.CompletedAt = time.Now()
 	t.progress.DownloadedBytes = t.progress.TotalBytes
 
-	t.events <- ProgressEvent{
+	t.trySend(ProgressEvent{
 		Type:    EventDownloadComplete,
 		ID:      t.id,
 		Message: "Download complete",
 		Current: t.progress.TotalBytes,
 		Total:   t.progress.TotalBytes,
-	}
+	})
 }
 
 // Error marks the download as failed
@@ -151,13 +159,13 @@ func (t *baseTracker) Error(err error) {
 	t.progress.Error = err
 	t.progress.CompletedAt = time.Now()
 
-	t.events <- ProgressEvent{
+	t.trySend(ProgressEvent{
 		Type:    EventDownloadError,
 		ID:      t.id,
 		Message: err.Error(),
 		Current: t.progress.DownloadedBytes,
 		Total:   t.progress.TotalBytes,
-	}
+	})
 }
 
 // GetID returns the unique identifier

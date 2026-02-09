@@ -66,3 +66,13 @@ func (c *Config) Save() error {
 func Get() *Config {
 	return Load()
 }
+
+func (c *Config) GetParallelDownloads() int {
+	if c.ParallelDownloads <= 0 {
+		return 4
+	}
+	if c.ParallelDownloads > 20 {
+		return 20
+	}
+	return c.ParallelDownloads
+}

@@ -23,20 +23,22 @@ var uninstallCmd = &cobra.Command{
 		for _, pkg := range args {
 			pkgPath := filepath.Join(client.Cellar, pkg)
 
-			// Check if package exists
 			if _, err := os.Stat(pkgPath); os.IsNotExist(err) {
 				fmt.Printf("⚠️  %s is not installed\n", pkg)
 				continue
 			}
 
-			// Remove from Cellar
+			client.Unlink(pkg)
+
+			optLink := filepath.Join(client.Prefix, "opt", pkg)
+			if info, err := os.Lstat(optLink); err == nil && info.Mode()&os.ModeSymlink != 0 {
+				os.Remove(optLink)
+			}
+
 			if err := os.RemoveAll(pkgPath); err != nil {
 				fmt.Printf("❌ Error removing %s: %v\n", pkg, err)
 				continue
 			}
-
-			// Unlink (best effort - ignore errors)
-			client.Unlink(pkg)
 
 			fmt.Printf("✅ Uninstalled %s\n", pkg)
 		}

@@ -27,6 +27,7 @@ var installCmd = &cobra.Command{
 
 		cfg := config.Get()
 		client.Verbose = installVerbose || cfg.Verbose
+		client.MaxParallel = cfg.GetParallelDownloads()
 
 		if showProgress {
 			client.EnableProgress()
@@ -59,7 +60,7 @@ func displayProgress(pm *progress.Manager) {
 				agg.OverallPercentage, agg.ActiveDownloads, speedMB)
 		}
 
-		if pm.IsComplete() {
+		if pm.IsComplete() || agg.TotalDownloads == agg.CompletedDownloads+agg.FailedDownloads {
 			fmt.Println()
 			return
 		}

@@ -181,7 +181,9 @@ func (c *Client) GetOutdated() ([]OutdatedPackage, error) {
 	return outdated, nil
 }
 
-// stripRevision removes revision suffixes like "_1" from version strings
+// stripRevision removes revision suffixes like "_1" from version strings.
+// NOTE: Version comparison uses simple string equality after stripping revisions,
+// which can produce false positives (e.g., "1.0" vs "1.0.0" are treated as different).
 func stripRevision(version string) string {
 	if idx := strings.Index(version, "_"); idx != -1 {
 		return version[:idx]

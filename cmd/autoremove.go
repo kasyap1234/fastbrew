@@ -69,13 +69,20 @@ Use --dry-run to preview what would be removed without actually removing anythin
 		for _, pkg := range orphans {
 			pkgPath := filepath.Join(client.Cellar, pkg)
 
+			// Unlink first while Cellar still exists
+			client.Unlink(pkg)
+
+			// Remove opt symlink
+			optLink := filepath.Join(client.Prefix, "opt", pkg)
+			if info, err := os.Lstat(optLink); err == nil && info.Mode()&os.ModeSymlink != 0 {
+				os.Remove(optLink)
+			}
+
+			// Then remove from Cellar
 			if err := os.RemoveAll(pkgPath); err != nil {
 				fmt.Printf("❌ Error removing %s: %v\n", pkg, err)
 				continue
 			}
-
-			// Unlink (best effort)
-			client.Unlink(pkg)
 
 			fmt.Printf("✅ Removed %s\n", pkg)
 			removed++

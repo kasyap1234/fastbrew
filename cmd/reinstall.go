@@ -4,6 +4,8 @@ import (
 	"fastbrew/internal/brew"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 )
@@ -29,12 +31,30 @@ var reinstallCmd = &cobra.Command{
 		for _, pkg := range args {
 			fmt.Printf("🔄 Reinstalling %s...\n", pkg)
 
+			isCask, _ := client.IsCask(pkg)
+			if isCask {
+				fmt.Println("  🍷 Reinstalling cask via brew...")
+				cmd := exec.Command("brew", "reinstall", "--cask", pkg)
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				if err := cmd.Run(); err != nil {
+					fmt.Printf("  ❌ Error reinstalling cask: %v\n", err)
+				} else {
+					fmt.Printf("  ✅ %s reinstalled successfully!\n", pkg)
+				}
+				continue
+			}
+
 			fmt.Println("  🔗 Unlinking...")
 			if err := client.Unlink(pkg); err != nil && reinstallVerbose {
 				fmt.Printf("  ⚠️  Unlink warning: %v\n", err)
 			}
 
 			fmt.Println("  🗑️  Removing old version...")
+			pkgPath := filepath.Join(client.Cellar, pkg)
+			if err := os.RemoveAll(pkgPath); err != nil && reinstallVerbose {
+				fmt.Printf("  ⚠️  Removal warning: %v\n", err)
+			}
 
 			formula, err := client.FetchFormula(pkg)
 			if err != nil {

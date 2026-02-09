@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 )
 
@@ -30,58 +32,88 @@ func (c *Client) LinkDryRun(name, version string) (*LinkResult, error) {
 
 func (c *Client) linkInternal(name, version string, dryRun bool) (*LinkResult, error) {
 	cellarPath := filepath.Join(c.Prefix, "Cellar", name, version)
-	binDir := filepath.Join(cellarPath, "bin")
 	result := &LinkResult{
 		Package:  name,
 		Binaries: make([]string, 0),
 		Success:  true,
 	}
 
-	if _, err := os.Stat(binDir); os.IsNotExist(err) {
-		return result, nil
-	}
-
-	targetBin := filepath.Join(c.Prefix, "bin")
+	optDir := filepath.Join(c.Prefix, "opt")
+	optLink := filepath.Join(optDir, name)
 	if !dryRun {
-		if err := os.MkdirAll(targetBin, 0755); err != nil {
+		os.MkdirAll(optDir, 0755)
+		if existing, err := os.Lstat(optLink); err == nil {
+			if existing.Mode()&os.ModeSymlink != 0 {
+				os.Remove(optLink)
+			}
+		}
+		if err := os.Symlink(cellarPath, optLink); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("failed to create opt link: %w", err))
 			result.Success = false
-			result.Errors = append(result.Errors, err)
-			return result, err
 		}
 	}
 
-	entries, err := os.ReadDir(binDir)
-	if err != nil {
-		result.Success = false
-		result.Errors = append(result.Errors, err)
-		return result, err
+	linkDirs := []string{"bin", "sbin", "lib", "include", "share", "etc"}
+	if runtime.GOOS == "darwin" {
+		linkDirs = append(linkDirs, "Frameworks")
 	}
 
-	for _, entry := range entries {
-		if entry.IsDir() {
+	for _, dir := range linkDirs {
+		srcDir := filepath.Join(cellarPath, dir)
+		if _, err := os.Stat(srcDir); os.IsNotExist(err) {
 			continue
 		}
+		targetDir := filepath.Join(c.Prefix, dir)
+		if !dryRun {
+			os.MkdirAll(targetDir, 0755)
+		}
+		c.linkDir(srcDir, targetDir, cellarPath, result, dryRun)
+	}
 
-		src := filepath.Join(binDir, entry.Name())
-		dst := filepath.Join(targetBin, entry.Name())
+	return result, nil
+}
 
-		result.Binaries = append(result.Binaries, entry.Name())
+func (c *Client) linkDir(srcDir, targetDir, cellarPath string, result *LinkResult, dryRun bool) {
+	filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if path == srcDir {
+			return nil
+		}
+
+		rel, _ := filepath.Rel(srcDir, path)
+		dst := filepath.Join(targetDir, rel)
+
+		if info.IsDir() {
+			if !dryRun {
+				os.MkdirAll(dst, 0755)
+			}
+			return nil
+		}
+
+		result.Binaries = append(result.Binaries, rel)
 
 		if dryRun {
-			continue
+			return nil
+		}
+
+		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("failed to create dir for %s: %w", rel, err))
+			return nil
 		}
 
 		if _, err := os.Lstat(dst); err == nil {
 			os.Remove(dst)
 		}
 
-		if err := os.Symlink(src, dst); err != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("failed to link %s: %w", entry.Name(), err))
+		if err := os.Symlink(path, dst); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("failed to link %s: %w", rel, err))
 			result.Success = false
 		}
-	}
 
-	return result, nil
+		return nil
+	})
 }
 
 type ConflictTracker struct {
@@ -157,39 +189,67 @@ func (ct *ConflictTracker) GetAllTrackedBinaries() map[string]string {
 
 func (c *Client) Unlink(name string) error {
 	pkgDir := filepath.Join(c.Cellar, name)
+	cellarPrefix := filepath.Join(c.Cellar, name) + string(filepath.Separator)
+
 	versions, err := os.ReadDir(pkgDir)
 	if err != nil {
 		return err
 	}
 
-	targetBin := filepath.Join(c.Prefix, "bin")
+	optLink := filepath.Join(c.Prefix, "opt", name)
+	if info, err := os.Lstat(optLink); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		os.Remove(optLink)
+	}
+
+	linkDirs := []string{"bin", "sbin", "lib", "include", "share", "etc"}
+	if runtime.GOOS == "darwin" {
+		linkDirs = append(linkDirs, "Frameworks")
+	}
 
 	for _, vEntry := range versions {
 		if !vEntry.IsDir() {
 			continue
 		}
 
-		binDir := filepath.Join(pkgDir, vEntry.Name(), "bin")
-		if _, err := os.Stat(binDir); os.IsNotExist(err) {
-			continue
-		}
-
-		binaries, err := os.ReadDir(binDir)
-		if err != nil {
-			continue
-		}
-
-		for _, bin := range binaries {
-			if bin.IsDir() {
+		for _, dir := range linkDirs {
+			srcDir := filepath.Join(pkgDir, vEntry.Name(), dir)
+			if _, err := os.Stat(srcDir); os.IsNotExist(err) {
 				continue
 			}
-
-			linkPath := filepath.Join(targetBin, bin.Name())
-			if info, err := os.Lstat(linkPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
-				os.Remove(linkPath)
-			}
+			targetDir := filepath.Join(c.Prefix, dir)
+			c.unlinkDir(srcDir, targetDir, cellarPrefix)
 		}
 	}
 
 	return nil
+}
+
+func (c *Client) unlinkDir(srcDir, targetDir, cellarPrefix string) {
+	filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+
+		rel, _ := filepath.Rel(srcDir, path)
+		linkPath := filepath.Join(targetDir, rel)
+
+		linfo, err := os.Lstat(linkPath)
+		if err != nil {
+			return nil
+		}
+		if linfo.Mode()&os.ModeSymlink == 0 {
+			return nil
+		}
+
+		target, err := os.Readlink(linkPath)
+		if err != nil {
+			return nil
+		}
+		if !strings.HasPrefix(target, cellarPrefix) {
+			return nil
+		}
+
+		os.Remove(linkPath)
+		return nil
+	})
 }

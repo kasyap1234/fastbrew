@@ -2,8 +2,10 @@ package brew
 
 import (
 	"bytes"
+	"context"
 	"encoding/gob"
 	"encoding/json"
+	"fastbrew/internal/httpclient"
 	"fmt"
 	"io"
 	"net/http"
@@ -207,7 +209,16 @@ func (c *Client) EnsureFreshJSONs() error {
 }
 
 func (c *Client) downloadAndCompress(url, path, label string) error {
-	resp, err := http.Get(url)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+
+	httpClient := httpclient.Get()
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -403,7 +414,16 @@ func loadJSON(path string, v interface{}) error {
 }
 
 func downloadFile(url, path string) error {
-	resp, err := http.Get(url)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+
+	httpClient := httpclient.Get()
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}

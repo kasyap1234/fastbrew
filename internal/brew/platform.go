@@ -64,11 +64,8 @@ func getMacOSVersion() (string, error) {
 
 	major := parts[0]
 	switch major {
-	case "26", "25", "24", "23", "22", "21", "20", "19", "18", "17":
-		// Future macOS versions - map to latest known for compatibility
-		return "sequoia", nil
 	case "16":
-		return "sequoia", nil
+		return "tahoe", nil
 	case "15":
 		return "sequoia", nil
 	case "14":
@@ -79,7 +76,12 @@ func getMacOSVersion() (string, error) {
 		return "monterey", nil
 	case "11":
 		return "big_sur", nil
+	default:
+		majorInt := 0
+		fmt.Sscanf(major, "%d", &majorInt)
+		if majorInt > 16 {
+			return "tahoe", nil
+		}
+		return "", fmt.Errorf("unsupported macOS major version: %s", major)
 	}
-
-	return "", fmt.Errorf("unsupported macOS major version: %s", major)
 }

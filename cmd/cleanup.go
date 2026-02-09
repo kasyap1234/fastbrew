@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -59,11 +60,43 @@ var cleanupCmd = &cobra.Command{
 						continue
 					}
 					name := ce.Name()
-					if name != "formula.json" && name != "cask.json" && name != "search.gob" {
+					if name != "formula.json.zst" && name != "cask.json.zst" &&
+						name != "search.gob.zst" && name != "prefix_index.gob" &&
+						!strings.HasSuffix(name, ".fastbrew-resume") {
 						os.Remove(filepath.Join(cacheDir, name))
 					}
 				}
 			}
+		}
+
+		fmt.Println("🔗 Checking for broken symlinks...")
+		linkDirs := []string{"bin", "sbin", "lib", "include", "share", "etc", "opt"}
+		brokenCount := 0
+		for _, dir := range linkDirs {
+			dirPath := filepath.Join(client.Prefix, dir)
+			if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+				continue
+			}
+			filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return nil
+				}
+				linfo, lerr := os.Lstat(path)
+				if lerr != nil {
+					return nil
+				}
+				if linfo.Mode()&os.ModeSymlink != 0 {
+					if _, serr := os.Stat(path); serr != nil {
+						fmt.Printf("  🗑️  Removing broken symlink: %s\n", path)
+						os.Remove(path)
+						brokenCount++
+					}
+				}
+				return nil
+			})
+		}
+		if brokenCount > 0 {
+			fmt.Printf("  Removed %d broken symlink(s)\n", brokenCount)
 		}
 
 		fmt.Println("✅ Cleanup complete!")

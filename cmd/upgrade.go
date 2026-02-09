@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fastbrew/internal/brew"
+	"fastbrew/internal/config"
 	"fmt"
 	"os"
 
@@ -18,23 +19,43 @@ var upgradeCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
+		cfg := config.Get()
+		client.MaxParallel = cfg.GetParallelDownloads()
+
 		pinned, _ := loadPinnedPackages()
-		if len(pinned) > 0 && len(args) == 0 {
-			fmt.Printf("ℹ️  Skipping %d pinned package(s)\n", len(pinned))
-		}
 
 		var filtered []string
-		for _, pkg := range args {
-			if pinned[pkg] {
-				fmt.Printf("⏭️  Skipping pinned package: %s\n", pkg)
-				continue
+		if len(args) > 0 {
+			for _, pkg := range args {
+				if pinned[pkg] {
+					fmt.Printf("⏭️  Skipping pinned package: %s\n", pkg)
+					continue
+				}
+				filtered = append(filtered, pkg)
 			}
-			filtered = append(filtered, pkg)
+			if len(filtered) == 0 {
+				fmt.Println("All specified packages are pinned.")
+				return
+			}
 		}
 
-		if len(args) > 0 && len(filtered) == 0 {
-			fmt.Println("All specified packages are pinned.")
-			return
+		if len(args) == 0 && len(pinned) > 0 {
+			outdated, err := client.GetOutdated()
+			if err != nil {
+				fmt.Printf("Error checking outdated: %v\n", err)
+				os.Exit(1)
+			}
+			for _, pkg := range outdated {
+				if pinned[pkg.Name] {
+					fmt.Printf("⏭️  Skipping pinned package: %s\n", pkg.Name)
+					continue
+				}
+				filtered = append(filtered, pkg.Name)
+			}
+			if len(filtered) == 0 {
+				fmt.Println("✅ All packages up to date or pinned.")
+				return
+			}
 		}
 
 		if err := client.UpgradeNative(filtered); err != nil {

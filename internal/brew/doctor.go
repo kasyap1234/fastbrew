@@ -194,7 +194,7 @@ func (d *Doctor) checkOutdatedIndex() CheckResult {
 		}
 	}
 
-	fPath := filepath.Join(cacheDir, "formula.json")
+	fPath := filepath.Join(cacheDir, "formula.json.zst")
 	info, err := os.Stat(fPath)
 	if os.IsNotExist(err) {
 		return CheckResult{

@@ -4,6 +4,8 @@ import (
 	"fastbrew/internal/brew"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -29,7 +31,12 @@ var linkCmd = &cobra.Command{
 		for _, pkg := range args {
 			if linkDryRun {
 				fmt.Printf("Would link %s...\n", pkg)
-				result, err := client.LinkDryRun(pkg, "")
+				version, verErr := findInstalledVersion(client, pkg)
+				if verErr != nil {
+					fmt.Printf("  Error: %v\n", verErr)
+					continue
+				}
+				result, err := client.LinkDryRun(pkg, version)
 				if err != nil {
 					fmt.Printf("  Error: %v\n", err)
 					continue
@@ -41,7 +48,14 @@ var linkCmd = &cobra.Command{
 			}
 
 			fmt.Printf("🔗 Linking %s...\n", pkg)
-			result, err := client.Link(pkg, "")
+
+			version, verErr := findInstalledVersion(client, pkg)
+			if verErr != nil {
+				fmt.Printf("  ❌ Error: %v\n", verErr)
+				continue
+			}
+
+			result, err := client.Link(pkg, version)
 			if err != nil {
 				fmt.Printf("  ❌ Error: %v\n", err)
 				continue
@@ -80,6 +94,23 @@ var unlinkCmd = &cobra.Command{
 			fmt.Printf("  ✅ Unlinked\n")
 		}
 	},
+}
+
+func findInstalledVersion(client *brew.Client, pkg string) (string, error) {
+	pkgDir := filepath.Join(client.Cellar, pkg)
+	entries, err := os.ReadDir(pkgDir)
+	if err != nil {
+		return "", fmt.Errorf("%s is not installed", pkg)
+	}
+	if len(entries) == 0 {
+		return "", fmt.Errorf("%s has no installed versions", pkg)
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].IsDir() && !strings.HasPrefix(entries[i].Name(), ".") {
+			return entries[i].Name(), nil
+		}
+	}
+	return "", fmt.Errorf("%s has no installed versions", pkg)
 }
 
 func init() {
