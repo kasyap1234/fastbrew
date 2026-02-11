@@ -18,19 +18,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/klauspost/compress/zstd"
 )
 
-// InstallBottle downloads and extracts a bottle for the given formula
-func (c *Client) InstallBottle(f *RemoteFormula) error {
+// DownloadBottle downloads the bottle for a formula and returns the path to the cached tarball.
+// It does not print any output.
+func (c *Client) DownloadBottle(f *RemoteFormula) (string, error) {
 	bottleURL, sha256Sum, err := f.GetBottleInfo()
 	if err != nil {
-		return err
+		return "", err
 	}
-
-	fmt.Printf("  ⬇️  Downloading bottle for %s...\n", f.Name)
 
 	cacheDir, _ := c.GetCacheDir()
 	tarPath := filepath.Join(cacheDir, fmt.Sprintf("%s-%s.bottle", f.Name, f.Versions.Stable))
@@ -42,11 +40,15 @@ func (c *Client) InstallBottle(f *RemoteFormula) error {
 	}
 
 	if err := c.DownloadWithProgress(bottleURL, tarPath, sha256Sum, tracker); err != nil {
-		return err
+		return "", err
 	}
 
-	fmt.Printf("  📦 Extracting %s...\n", f.Name)
+	return tarPath, nil
+}
 
+// ExtractAndInstallBottle extracts a previously downloaded bottle tarball into the Cellar.
+// It does not print any output.
+func (c *Client) ExtractAndInstallBottle(f *RemoteFormula, tarPath string) error {
 	cellarPath := filepath.Join(c.Prefix, "Cellar")
 
 	tmpDir := filepath.Join(cellarPath, fmt.Sprintf(".fastbrew-tmp-%s-%d", f.Name, rand.IntN(1000000)))
@@ -55,8 +57,7 @@ func (c *Client) InstallBottle(f *RemoteFormula) error {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	start := time.Now()
-	if err := ExtractBottle(tarPath, tmpDir); err != nil {
+	if err := ExtractBottle(tarPath, tmpDir, c.Prefix); err != nil {
 		return fmt.Errorf("extraction failed: %w", err)
 	}
 
@@ -83,11 +84,16 @@ func (c *Client) InstallBottle(f *RemoteFormula) error {
 		return fmt.Errorf("failed to move extracted package into place: %w", err)
 	}
 
-	if c.Verbose {
-		fmt.Printf("  ⏱️  Extracted %s in %s\n", f.Name, time.Since(start).Round(time.Millisecond))
-	}
-
 	return nil
+}
+
+// InstallBottle downloads and extracts a bottle for the given formula (legacy wrapper).
+func (c *Client) InstallBottle(f *RemoteFormula) error {
+	tarPath, err := c.DownloadBottle(f)
+	if err != nil {
+		return err
+	}
+	return c.ExtractAndInstallBottle(f, tarPath)
 }
 
 // DownloadAndVerify downloads the file and checks generic SHA256
@@ -340,7 +346,7 @@ func verifyChecksum(path, expected string) error {
 
 // ExtractBottle extracts a bottle archive (gzip or zstd compressed tar) to cellarDir.
 // The tarball structure is `name/version/...`, extracted relative to cellarDir.
-func ExtractBottle(tarPath, cellarDir string) error {
+func ExtractBottle(tarPath, cellarDir, prefixDir string) error {
 	f, err := os.Open(tarPath)
 	if err != nil {
 		return err
@@ -422,7 +428,7 @@ func ExtractBottle(tarPath, cellarDir string) error {
 				return fmt.Errorf("failed to remove existing %s: %w", target, err)
 			}
 			linkTarget := header.Linkname
-			if !isSafeSymlink(cellarDir, target, linkTarget) {
+			if !isSafeSymlink(cellarDir, prefixDir, target, linkTarget) {
 				return fmt.Errorf("unsafe symlink target %q for %s", linkTarget, header.Name)
 			}
 			if err := os.Symlink(linkTarget, target); err != nil {
@@ -453,12 +459,14 @@ func ExtractBottle(tarPath, cellarDir string) error {
 	return nil
 }
 
-func isSafeSymlink(cellarDir, target, linkname string) bool {
+func isSafeSymlink(cellarDir, prefixDir, target, linkname string) bool {
 	var resolved string
 	if filepath.IsAbs(linkname) {
 		resolved = filepath.Clean(linkname)
 	} else {
 		resolved = filepath.Clean(filepath.Join(filepath.Dir(target), linkname))
 	}
-	return strings.HasPrefix(resolved, filepath.Clean(cellarDir)+string(os.PathSeparator))
+	cleanCellar := filepath.Clean(cellarDir) + string(os.PathSeparator)
+	cleanPrefix := filepath.Clean(prefixDir) + string(os.PathSeparator)
+	return strings.HasPrefix(resolved, cleanCellar) || strings.HasPrefix(resolved, cleanPrefix)
 }

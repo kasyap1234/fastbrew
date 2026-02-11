@@ -6,8 +6,12 @@ import (
 	"fastbrew/internal/httpclient"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 )
+
+var macOSFallbackOrder = []string{"tahoe", "sequoia", "sonoma", "ventura", "monterey", "big_sur"}
 
 const FormulaAPIURL = "https://formulae.brew.sh/api/formula"
 
@@ -83,15 +87,44 @@ func (f *RemoteFormula) GetBottleInfo() (string, string, error) {
 		return "", "", err
 	}
 
-	file, ok := f.Bottle.Stable.Files[platform]
-	if !ok {
-		// Fallback to "all" if available (common for scripts/no-arch packages)
-		if fileAll, okAll := f.Bottle.Stable.Files["all"]; okAll {
-			return fileAll.URL, fileAll.SHA256, nil
-		}
-
-		return "", "", fmt.Errorf("no bottle available for platform %s", platform)
+	if file, ok := f.Bottle.Stable.Files[platform]; ok {
+		return file.URL, file.SHA256, nil
 	}
 
-	return file.URL, file.SHA256, nil
+	var candidates []string
+	if strings.HasPrefix(platform, "arm64_") {
+		version := strings.TrimPrefix(platform, "arm64_")
+		for i, v := range macOSFallbackOrder {
+			if v == version {
+				for _, older := range macOSFallbackOrder[i+1:] {
+					candidates = append(candidates, "arm64_"+older)
+				}
+				break
+			}
+		}
+	} else {
+		for i, v := range macOSFallbackOrder {
+			if v == platform {
+				candidates = append(candidates, macOSFallbackOrder[i+1:]...)
+				break
+			}
+		}
+	}
+
+	for _, candidate := range candidates {
+		if file, ok := f.Bottle.Stable.Files[candidate]; ok {
+			return file.URL, file.SHA256, nil
+		}
+	}
+
+	if file, ok := f.Bottle.Stable.Files["all"]; ok {
+		return file.URL, file.SHA256, nil
+	}
+
+	available := make([]string, 0, len(f.Bottle.Stable.Files))
+	for k := range f.Bottle.Stable.Files {
+		available = append(available, k)
+	}
+	sort.Strings(available)
+	return "", "", fmt.Errorf("no bottle available for platform %s (available: %s)", platform, strings.Join(available, ", "))
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"sync"
 )
 
@@ -15,7 +16,6 @@ func (c *Client) UpgradeNative(packages []string) error {
 		return err
 	}
 
-	// Filter by requested packages if specified
 	if len(packages) > 0 {
 		reqMap := make(map[string]bool)
 		for _, name := range packages {
@@ -35,7 +35,6 @@ func (c *Client) UpgradeNative(packages []string) error {
 		return nil
 	}
 
-	// Split into casks and formulae
 	var caskOutdated, formulaOutdated []OutdatedPackage
 	for _, pkg := range outdated {
 		if pkg.IsCask {
@@ -45,20 +44,18 @@ func (c *Client) UpgradeNative(packages []string) error {
 		}
 	}
 
-	// Upgrade formulae using native bottle installation
 	if len(formulaOutdated) > 0 {
 		if err := c.upgradeFormulae(formulaOutdated); err != nil {
 			return err
 		}
 	}
 
-	// Upgrade casks using brew upgrade --cask
 	if len(caskOutdated) > 0 {
-		fmt.Printf("🍷 Upgrading %d cask(s)...\n", len(caskOutdated))
+		fmt.Printf("\n🍷 Upgrading %d cask(s)...\n", len(caskOutdated))
 		caskNames := make([]string, len(caskOutdated))
 		for i, pkg := range caskOutdated {
 			caskNames[i] = pkg.Name
-			fmt.Printf("  ⬆️  %s: %s → %s\n", pkg.Name, pkg.CurrentVersion, pkg.NewVersion)
+			fmt.Printf("  %s %s → %s\n", pkg.Name, pkg.CurrentVersion, pkg.NewVersion)
 		}
 		args := append([]string{"upgrade", "--cask"}, caskNames...)
 		cmd := exec.Command("brew", args...)
@@ -67,94 +64,191 @@ func (c *Client) UpgradeNative(packages []string) error {
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("cask upgrade failed: %w", err)
 		}
-		fmt.Println("✅ Casks upgraded successfully")
 	}
 
 	return nil
 }
 
-// upgradeFormulae handles formula upgrades via bottles
+type downloadResult struct {
+	formula *RemoteFormula
+	tarPath string
+	err     error
+}
+
+// upgradeFormulae handles formula upgrades via bottles with clean phased output
 func (c *Client) upgradeFormulae(outdated []OutdatedPackage) error {
-	var outdatedFormulae []*RemoteFormula
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-
-	type fetchErr struct {
-		name string
-		err  error
-	}
-	var fetchErrors []fetchErr
-	var errMu sync.Mutex
-
+	// Phase 1: Fetch metadata
 	fmt.Printf("🔍 Fetching formula metadata for %d package(s)...\n", len(outdated))
+
+	type metaResult struct {
+		pkg    OutdatedPackage
+		remote *RemoteFormula
+		err    error
+	}
+
+	metaCh := make(chan metaResult, len(outdated))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, c.getMaxParallel())
 
 	for _, pkg := range outdated {
 		wg.Add(1)
 		go func(p OutdatedPackage) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			remote, err := c.FetchFormula(p.Name)
-			if err != nil {
-				errMu.Lock()
-				fetchErrors = append(fetchErrors, fetchErr{name: p.Name, err: err})
-				errMu.Unlock()
-				return
-			}
-			mu.Lock()
-			outdatedFormulae = append(outdatedFormulae, remote)
-			mu.Unlock()
+			metaCh <- metaResult{pkg: p, remote: remote, err: err}
 		}(pkg)
 	}
 	wg.Wait()
+	close(metaCh)
 
-	if len(fetchErrors) > 0 {
-		for _, fe := range fetchErrors {
-			fmt.Printf("  ⚠️  Failed to fetch metadata for %s: %v\n", fe.name, fe.err)
+	nameToOutdated := make(map[string]OutdatedPackage, len(outdated))
+	for _, pkg := range outdated {
+		nameToOutdated[pkg.Name] = pkg
+	}
+
+	var formulae []*RemoteFormula
+	var metaErrors []string
+	for r := range metaCh {
+		if r.err != nil {
+			metaErrors = append(metaErrors, fmt.Sprintf("%s: %v", r.pkg.Name, r.err))
+		} else {
+			formulae = append(formulae, r.remote)
 		}
 	}
 
-	if len(outdatedFormulae) == 0 {
+	sort.Slice(formulae, func(i, j int) bool {
+		return formulae[i].Name < formulae[j].Name
+	})
+
+	if len(metaErrors) > 0 {
+		for _, e := range metaErrors {
+			fmt.Printf("  ⚠️  %s\n", e)
+		}
+	}
+
+	if len(formulae) == 0 {
 		return nil
 	}
 
-	fmt.Printf("📦 Upgrading %d formulae...\n", len(outdatedFormulae))
+	// Print upgrade plan
+	fmt.Printf("\n📦 %d formula(e) to upgrade:\n", len(formulae))
+	for _, f := range formulae {
+		if pkg, ok := nameToOutdated[f.Name]; ok {
+			fmt.Printf("  %s %s → %s\n", f.Name, pkg.CurrentVersion, f.Versions.Stable)
+		} else {
+			fmt.Printf("  %s → %s\n", f.Name, f.Versions.Stable)
+		}
+	}
 
-	errChan := make(chan error, len(outdatedFormulae))
-	sem := make(chan struct{}, c.getMaxParallel())
+	// Phase 2: Download all bottles in parallel
+	fmt.Printf("\n⬇️  Downloading %d bottle(s)...\n", len(formulae))
 
-	fmt.Println("⬇️  Downloading bottles in parallel...")
-	for _, f := range outdatedFormulae {
+	dlCh := make(chan downloadResult, len(formulae))
+
+	for _, f := range formulae {
 		wg.Add(1)
 		go func(frm *RemoteFormula) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-
-			fmt.Printf("  ⬆️  Upgrading %s → %s\n", frm.Name, frm.Versions.Stable)
-			if err := c.InstallBottle(frm); err != nil {
-				errChan <- fmt.Errorf("failed to install %s: %w", frm.Name, err)
-				fmt.Printf("  ❌ Failed %s: %v\n", frm.Name, err)
-			} else {
-				fmt.Printf("  ✅ Downloaded %s\n", frm.Name)
-			}
+			tarPath, err := c.DownloadBottle(frm)
+			dlCh <- downloadResult{formula: frm, tarPath: tarPath, err: err}
 		}(f)
 	}
 	wg.Wait()
-	close(errChan)
+	close(dlCh)
 
-	var installErrors []error
-	for err := range errChan {
-		installErrors = append(installErrors, err)
-	}
-	if len(installErrors) > 0 {
-		for _, e := range installErrors {
-			fmt.Printf("  ⚠️  %v\n", e)
+	var downloaded []downloadResult
+	var dlErrors []downloadResult
+	for r := range dlCh {
+		if r.err != nil {
+			dlErrors = append(dlErrors, r)
+		} else {
+			downloaded = append(downloaded, r)
 		}
-		return fmt.Errorf("%d package(s) failed to upgrade", len(installErrors))
 	}
 
-	fmt.Println("🔗 Linking binaries...")
-	if err := c.linkParallel(outdatedFormulae); err != nil {
+	sort.Slice(downloaded, func(i, j int) bool {
+		return downloaded[i].formula.Name < downloaded[j].formula.Name
+	})
+
+	if len(dlErrors) > 0 {
+		for _, r := range dlErrors {
+			fmt.Printf("  ❌ %s: %v\n", r.formula.Name, r.err)
+		}
+	}
+
+	fmt.Printf("  ✅ %d downloaded", len(downloaded))
+	if len(dlErrors) > 0 {
+		fmt.Printf(", %d failed", len(dlErrors))
+	}
+	fmt.Println()
+
+	if len(downloaded) == 0 {
+		return fmt.Errorf("%d package(s) failed to download", len(dlErrors))
+	}
+
+	// Phase 3: Extract all bottles in parallel
+	fmt.Printf("\n📦 Extracting %d bottle(s)...\n", len(downloaded))
+
+	type extractResult struct {
+		formula *RemoteFormula
+		err     error
+	}
+
+	exCh := make(chan extractResult, len(downloaded))
+
+	for _, dl := range downloaded {
+		wg.Add(1)
+		go func(d downloadResult) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			err := c.ExtractAndInstallBottle(d.formula, d.tarPath)
+			exCh <- extractResult{formula: d.formula, err: err}
+		}(dl)
+	}
+	wg.Wait()
+	close(exCh)
+
+	var extracted []*RemoteFormula
+	var exErrors []extractResult
+	for r := range exCh {
+		if r.err != nil {
+			exErrors = append(exErrors, r)
+		} else {
+			extracted = append(extracted, r.formula)
+		}
+	}
+
+	if len(exErrors) > 0 {
+		for _, r := range exErrors {
+			fmt.Printf("  ❌ %s: %v\n", r.formula.Name, r.err)
+		}
+	}
+
+	fmt.Printf("  ✅ %d extracted", len(extracted))
+	if len(exErrors) > 0 {
+		fmt.Printf(", %d failed", len(exErrors))
+	}
+	fmt.Println()
+
+	if len(extracted) == 0 {
+		totalFailed := len(dlErrors) + len(exErrors)
+		return fmt.Errorf("%d package(s) failed to upgrade", totalFailed)
+	}
+
+	// Phase 4: Link
+	fmt.Println("\n🔗 Linking binaries...")
+	if err := c.linkParallel(extracted); err != nil {
 		return err
+	}
+
+	totalFailed := len(dlErrors) + len(exErrors)
+	if totalFailed > 0 {
+		return fmt.Errorf("%d package(s) failed to upgrade", totalFailed)
 	}
 
 	return nil
