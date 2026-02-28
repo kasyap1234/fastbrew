@@ -51,7 +51,6 @@ var outdatedCmd = &cobra.Command{
 			}
 		}
 
-		os.Exit(1)
 	},
 }
 

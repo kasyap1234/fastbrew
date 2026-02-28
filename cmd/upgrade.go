@@ -24,41 +24,47 @@ var upgradeCmd = &cobra.Command{
 
 		pinned, _ := loadPinnedPackages()
 
-		var filtered []string
-		if len(args) > 0 {
-			for _, pkg := range args {
-				if pinned[pkg] {
-					fmt.Printf("⏭️  Skipping pinned package: %s\n", pkg)
-					continue
-				}
-				filtered = append(filtered, pkg)
-			}
-			if len(filtered) == 0 {
-				fmt.Println("All specified packages are pinned.")
-				return
-			}
+		// Get all outdated packages once
+		outdated, err := client.GetOutdated()
+		if err != nil {
+			fmt.Printf("Error checking outdated: %v\n", err)
+			os.Exit(1)
 		}
 
-		if len(args) == 0 && len(pinned) > 0 {
-			outdated, err := client.GetOutdated()
-			if err != nil {
-				fmt.Printf("Error checking outdated: %v\n", err)
-				os.Exit(1)
+		// Filter by requested packages if specified
+		if len(args) > 0 {
+			reqMap := make(map[string]bool)
+			for _, pkg := range args {
+				reqMap[pkg] = true
 			}
+			var filtered []brew.OutdatedPackage
+			for _, pkg := range outdated {
+				if reqMap[pkg.Name] {
+					filtered = append(filtered, pkg)
+				}
+			}
+			outdated = filtered
+		}
+
+		// Filter out pinned packages
+		if len(pinned) > 0 {
+			var filtered []brew.OutdatedPackage
 			for _, pkg := range outdated {
 				if pinned[pkg.Name] {
 					fmt.Printf("⏭️  Skipping pinned package: %s\n", pkg.Name)
 					continue
 				}
-				filtered = append(filtered, pkg.Name)
+				filtered = append(filtered, pkg)
 			}
-			if len(filtered) == 0 {
-				fmt.Println("✅ All packages up to date or pinned.")
-				return
-			}
+			outdated = filtered
 		}
 
-		if err := client.UpgradeNative(filtered); err != nil {
+		if len(outdated) == 0 {
+			fmt.Println("✅ All packages up to date or pinned.")
+			return
+		}
+
+		if err := client.UpgradeNative(nil, outdated); err != nil {
 			fmt.Printf("Error upgrading: %v\n", err)
 			os.Exit(1)
 		}

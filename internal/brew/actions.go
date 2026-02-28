@@ -165,11 +165,20 @@ func (c *Client) installFormulaeWithIndex(packages []string, idx *Index) error {
 		buildQueue(pkg)
 	}
 
-	fmt.Printf("📦 Found %d formulae to install. Downloading in parallel...\n", len(installQueue))
+	fmt.Printf("📦 Found %d formulae to install.\n", len(installQueue))
 
+	// Phase 1: Download all bottles in parallel
+	fmt.Printf("⬇️  Downloading %d bottle(s) in parallel...\n", len(installQueue))
+
+	type downloadResult struct {
+		formula *RemoteFormula
+		tarPath string
+		err     error
+	}
+
+	dlCh := make(chan downloadResult, len(installQueue))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, c.getMaxParallel())
-	errChan := make(chan error, len(installQueue))
 
 	for _, f := range installQueue {
 		wg.Add(1)
@@ -177,27 +186,71 @@ func (c *Client) installFormulaeWithIndex(packages []string, idx *Index) error {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-
-			if err := c.InstallBottle(frm); err != nil {
-				errChan <- fmt.Errorf("failed to install %s: %w", frm.Name, err)
-				fmt.Printf("  ❌ Failed %s: %v\n", frm.Name, err)
-			} else {
-				fmt.Printf("  ✅ Extracted %s\n", frm.Name)
-			}
+			tarPath, err := c.DownloadBottle(frm)
+			dlCh <- downloadResult{formula: frm, tarPath: tarPath, err: err}
 		}(f)
 	}
 	wg.Wait()
-	close(errChan)
+	close(dlCh)
+
+	var downloaded []downloadResult
+	var dlErrors []error
+	for r := range dlCh {
+		if r.err != nil {
+			dlErrors = append(dlErrors, fmt.Errorf("failed to download %s: %w", r.formula.Name, r.err))
+			fmt.Printf("  ❌ Failed to download %s: %v\n", r.formula.Name, r.err)
+		} else {
+			downloaded = append(downloaded, r)
+			fmt.Printf("  ✅ Downloaded %s\n", r.formula.Name)
+		}
+	}
+
+	if len(downloaded) == 0 {
+		return fmt.Errorf("%d package(s) failed to download", len(dlErrors))
+	}
+
+	// Phase 2: Extract bottles (limited concurrency for disk safety)
+	fmt.Printf("📦 Extracting %d bottle(s)...\n", len(downloaded))
+
+	type extractResult struct {
+		formula *RemoteFormula
+		err     error
+	}
+
+	exCh := make(chan extractResult, len(downloaded))
+	extractSem := make(chan struct{}, 2) // limit extraction concurrency
+
+	for _, dl := range downloaded {
+		wg.Add(1)
+		go func(d downloadResult) {
+			defer wg.Done()
+			extractSem <- struct{}{}
+			defer func() { <-extractSem }()
+			err := c.ExtractAndInstallBottle(d.formula, d.tarPath)
+			exCh <- extractResult{formula: d.formula, err: err}
+		}(dl)
+	}
+	wg.Wait()
+	close(exCh)
 
 	var installErrors []error
-	for err := range errChan {
-		installErrors = append(installErrors, err)
+	for r := range exCh {
+		if r.err != nil {
+			installErrors = append(installErrors, fmt.Errorf("failed to extract %s: %w", r.formula.Name, r.err))
+			fmt.Printf("  ❌ Failed to extract %s: %v\n", r.formula.Name, r.err)
+		} else {
+			fmt.Printf("  ✅ Extracted %s\n", r.formula.Name)
+		}
 	}
-	if len(installErrors) > 0 {
-		for _, e := range installErrors {
+
+	allErrors := append(dlErrors, installErrors...)
+	if len(allErrors) > 0 {
+		for _, e := range allErrors {
 			fmt.Printf("  ⚠️  %v\n", e)
 		}
-		return fmt.Errorf("%d package(s) failed to install", len(installErrors))
+		if len(downloaded) == len(dlErrors)+len(installErrors) {
+			return fmt.Errorf("%d package(s) failed to install", len(allErrors))
+		}
 	}
 
 	var linkQueue []*RemoteFormula
@@ -273,43 +326,17 @@ func (c *Client) linkParallel(installQueue []*RemoteFormula) error {
 	}
 
 	if len(parallelQueue) > 0 {
-		fmt.Printf("  ⚡ Linking %d packages in parallel...\n", len(parallelQueue))
-
-		var wg sync.WaitGroup
-		sem := make(chan struct{}, numWorkers)
-		errorChan := make(chan error, len(parallelQueue))
-		resultChan := make(chan *LinkResult, len(parallelQueue))
+		fmt.Printf("  🔗 Linking %d packages...\n", len(parallelQueue))
 
 		for _, f := range parallelQueue {
-			wg.Add(1)
-			go func(frm *RemoteFormula) {
-				defer wg.Done()
-				sem <- struct{}{}
-				defer func() { <-sem }()
-
-				result, err := c.Link(frm.Name, frm.Versions.Stable)
-				if err != nil {
-					errorChan <- fmt.Errorf("failed to link %s: %w", frm.Name, err)
-					fmt.Printf("  ❌ Failed to link %s: %v\n", frm.Name, err)
-				} else {
-					resultChan <- result
-				}
-			}(f)
-		}
-
-		wg.Wait()
-		close(errorChan)
-		close(resultChan)
-
-		successCount := 0
-		for result := range resultChan {
-			if result.Success {
-				successCount++
+			result, err := c.Link(f.Name, f.Versions.Stable)
+			if err != nil {
+				fmt.Printf("  ❌ Failed to link %s: %v\n", f.Name, err)
+				continue
 			}
-		}
-
-		if successCount > 0 {
-			fmt.Printf("  ✅ Linked %d packages in parallel\n", successCount)
+			if result.Success {
+				fmt.Printf("  ✅ Linked %s\n", f.Name)
+			}
 		}
 	}
 

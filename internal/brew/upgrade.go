@@ -10,10 +10,17 @@ import (
 
 // UpgradeNative performs native upgrades using bottle installation for formulae
 // and brew upgrade --cask for casks
-func (c *Client) UpgradeNative(packages []string) error {
-	outdated, err := c.GetOutdated()
-	if err != nil {
-		return err
+func (c *Client) UpgradeNative(packages []string, precomputedOutdated []OutdatedPackage) error {
+	var outdated []OutdatedPackage
+	var err error
+
+	if len(precomputedOutdated) > 0 {
+		outdated = precomputedOutdated
+	} else {
+		outdated, err = c.GetOutdated()
+		if err != nil {
+			return err
+		}
 	}
 
 	if len(packages) > 0 {

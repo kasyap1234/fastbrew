@@ -78,10 +78,30 @@ func (c *Client) ExtractAndInstallBottle(f *RemoteFormula, tarPath string) error
 	}
 
 	finalVersionDir := filepath.Join(finalPkgDir, f.Versions.Stable)
-	os.RemoveAll(finalVersionDir)
+
+	// Atomic swap: backup existing → rename new → cleanup backup
+	backupDir := finalVersionDir + ".fastbrew-backup"
+	_ = os.RemoveAll(backupDir) // clean any stale backup
+
+	hasExisting := false
+	if _, err := os.Stat(finalVersionDir); err == nil {
+		hasExisting = true
+		if err := os.Rename(finalVersionDir, backupDir); err != nil {
+			return fmt.Errorf("failed to backup existing version: %w", err)
+		}
+	}
 
 	if err := os.Rename(extractedPkgDir, finalVersionDir); err != nil {
+		// Rollback: restore the backup
+		if hasExisting {
+			_ = os.Rename(backupDir, finalVersionDir)
+		}
 		return fmt.Errorf("failed to move extracted package into place: %w", err)
+	}
+
+	// Success: remove backup
+	if hasExisting {
+		_ = os.RemoveAll(backupDir)
 	}
 
 	return nil
@@ -219,13 +239,15 @@ func (c *Client) DownloadWithProgress(url, dest, expectedSHA string, tracker pro
 		tracker.Start(totalSize)
 	}
 
-	buf := make([]byte, 32*1024)
+	buf := make([]byte, 1024*1024)
+	bufferedReader := bufio.NewReaderSize(resp.Body, 1024*1024)
+	bufferedWriter := bufio.NewWriterSize(out, 1024*1024)
 	downloaded := startByte
 
 	for {
-		n, readErr := resp.Body.Read(buf)
+		n, readErr := bufferedReader.Read(buf)
 		if n > 0 {
-			if _, writeErr := out.Write(buf[:n]); writeErr != nil {
+			if _, writeErr := bufferedWriter.Write(buf[:n]); writeErr != nil {
 				if pd != nil {
 					pd.DownloadedBytes = downloaded
 					pd.UpdateState(resume.StateFailed)
@@ -252,6 +274,9 @@ func (c *Client) DownloadWithProgress(url, dest, expectedSHA string, tracker pro
 		}
 	}
 
+	if err := bufferedWriter.Flush(); err != nil {
+		return err
+	}
 	out.Close()
 
 	if err := verifyChecksum(dest, expectedSHA); err != nil {
@@ -333,7 +358,7 @@ func verifyChecksum(path, expected string) error {
 	defer f.Close()
 
 	hasher := sha256.New()
-	if _, err := io.Copy(hasher, f); err != nil {
+	if _, err := io.CopyBuffer(hasher, f, make([]byte, 1024*1024)); err != nil {
 		return err
 	}
 
@@ -353,7 +378,7 @@ func ExtractBottle(tarPath, cellarDir, prefixDir string) error {
 	}
 	defer f.Close()
 
-	br := bufio.NewReader(f)
+	br := bufio.NewReaderSize(f, 1024*1024)
 	magic, err := br.Peek(4)
 	if err != nil {
 		return fmt.Errorf("failed to detect compression format: %w", err)
@@ -382,6 +407,7 @@ func ExtractBottle(tarPath, cellarDir, prefixDir string) error {
 	defer decompCloser.Close()
 
 	tr := tar.NewReader(decompReader)
+	extractBuf := make([]byte, 1024*1024)
 
 	for {
 		header, err := tr.Next()
@@ -413,7 +439,7 @@ func ExtractBottle(tarPath, cellarDir, prefixDir string) error {
 			if err != nil {
 				return fmt.Errorf("failed to create file %s: %w", target, err)
 			}
-			if _, err := io.Copy(outFile, tr); err != nil {
+			if _, err := io.CopyBuffer(outFile, tr, extractBuf); err != nil {
 				outFile.Close()
 				return fmt.Errorf("failed to write file %s: %w", target, err)
 			}
