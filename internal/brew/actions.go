@@ -477,10 +477,19 @@ func (c *Client) linkParallel(installQueue []*RemoteFormula, operation string) e
 }
 
 func (c *Client) isInstalled(name string) bool {
+	// Check Cellar for formulae
 	p := filepath.Join(c.Cellar, name)
 	if _, err := os.Stat(p); err == nil {
 		return true
 	}
+
+	// Check Caskroom for casks
+	caskroom := filepath.Join(c.Prefix, "Caskroom")
+	cp := filepath.Join(caskroom, name)
+	if _, err := os.Stat(cp); err == nil {
+		return true
+	}
+
 	return false
 }
 
