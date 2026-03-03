@@ -31,8 +31,19 @@ type Formula struct {
 	Desc         string          `json:"desc"`
 	Homepage     string          `json:"homepage"`
 	Versions     FormulaVersions `json:"versions"`
+	Revision     int             `json:"revision"`
 	Installed    []interface{}   `json:"installed"`
 	Dependencies []string        `json:"dependencies"`
+}
+
+// FullVersion returns the version string including the revision suffix.
+// e.g. "15.2.0" with revision 1 returns "15.2.0_1".
+func (f Formula) FullVersion() string {
+	v := f.Versions.Stable
+	if f.Revision > 0 {
+		v = fmt.Sprintf("%s_%d", v, f.Revision)
+	}
+	return v
 }
 
 type Cask struct {

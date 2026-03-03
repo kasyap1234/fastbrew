@@ -1,23 +1,27 @@
 package brew
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fastbrew/internal/httpclient"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// OutdatedPackage represents an outdated package with version info
 type OutdatedPackage struct {
 	Name           string `json:"name"`
 	CurrentVersion string `json:"current_version"`
 	NewVersion     string `json:"new_version"`
 	IsCask         bool   `json:"is_cask"`
+	IsTap          bool   `json:"is_tap"`
 }
 
 const CaskAPIURL = "https://formulae.brew.sh/api/cask"
@@ -93,7 +97,7 @@ func (c *Client) GetOutdatedForPackages(packages []string) ([]OutdatedPackage, e
 
 	formulaVersions := make(map[string]string, len(idx.Formulae))
 	for _, f := range idx.Formulae {
-		formulaVersions[f.Name] = f.Versions.Stable
+		formulaVersions[f.Name] = f.FullVersion()
 	}
 
 	caskVersions := make(map[string]string, len(idx.Casks))
@@ -104,9 +108,9 @@ func (c *Client) GetOutdatedForPackages(packages []string) ([]OutdatedPackage, e
 	var outdated []OutdatedPackage
 
 	for _, pkg := range targetPkgs {
-		installedBase := stripRevision(pkg.Version)
+		installedVer := pkg.Version
 		if pkg.IsCask {
-			if latest, ok := caskVersions[pkg.Name]; ok && isOutdated(installedBase, latest) {
+			if latest, ok := caskVersions[pkg.Name]; ok && isOutdated(installedVer, latest) {
 				outdated = append(outdated, OutdatedPackage{
 					Name:           pkg.Name,
 					CurrentVersion: pkg.Version,
@@ -115,7 +119,7 @@ func (c *Client) GetOutdatedForPackages(packages []string) ([]OutdatedPackage, e
 				})
 			} else if !ok {
 				cask, err := c.FetchCask(pkg.Name)
-				if err == nil && isOutdated(installedBase, cask.Version) {
+				if err == nil && isOutdated(installedVer, cask.Version) {
 					outdated = append(outdated, OutdatedPackage{
 						Name:           pkg.Name,
 						CurrentVersion: pkg.Version,
@@ -127,7 +131,7 @@ func (c *Client) GetOutdatedForPackages(packages []string) ([]OutdatedPackage, e
 			continue
 		}
 
-		if latest, ok := formulaVersions[pkg.Name]; ok && isOutdated(installedBase, latest) {
+		if latest, ok := formulaVersions[pkg.Name]; ok && isOutdated(installedVer, latest) {
 			outdated = append(outdated, OutdatedPackage{
 				Name:           pkg.Name,
 				CurrentVersion: pkg.Version,
@@ -135,14 +139,25 @@ func (c *Client) GetOutdatedForPackages(packages []string) ([]OutdatedPackage, e
 				IsCask:         false,
 			})
 		} else if !ok {
-			remote, err := c.FetchFormula(pkg.Name)
-			if err == nil && isOutdated(installedBase, remote.Versions.Stable) {
+			// Try tap formulas first
+			if tapVer, tapOk := c.GetTapFormulaVersion(pkg.Name); tapOk && isOutdated(installedVer, tapVer) {
 				outdated = append(outdated, OutdatedPackage{
 					Name:           pkg.Name,
 					CurrentVersion: pkg.Version,
-					NewVersion:     remote.Versions.Stable,
+					NewVersion:     tapVer,
 					IsCask:         false,
+					IsTap:          true,
 				})
+			} else if !tapOk {
+				remote, err := c.FetchFormula(pkg.Name)
+				if err == nil && isOutdated(installedVer, remote.Versions.Stable) {
+					outdated = append(outdated, OutdatedPackage{
+						Name:           pkg.Name,
+						CurrentVersion: pkg.Version,
+						NewVersion:     remote.Versions.Stable,
+						IsCask:         false,
+					})
+				}
 			}
 		}
 	}
@@ -169,7 +184,7 @@ func (c *Client) GetOutdated() ([]OutdatedPackage, error) {
 
 	formulaVersions := make(map[string]string, len(idx.Formulae))
 	for _, f := range idx.Formulae {
-		formulaVersions[f.Name] = f.Versions.Stable
+		formulaVersions[f.Name] = f.FullVersion()
 	}
 
 	caskVersions := make(map[string]string, len(idx.Casks))
@@ -182,10 +197,10 @@ func (c *Client) GetOutdated() ([]OutdatedPackage, error) {
 	var unknown []PackageInfo
 
 	for _, pkg := range installed {
-		installedBase := stripRevision(pkg.Version)
+		installedVer := pkg.Version
 		if pkg.IsCask {
 			if latest, ok := caskVersions[pkg.Name]; ok {
-				if isOutdated(installedBase, latest) {
+				if isOutdated(installedVer, latest) {
 					outdated = append(outdated, OutdatedPackage{
 						Name:           pkg.Name,
 						CurrentVersion: pkg.Version,
@@ -200,7 +215,7 @@ func (c *Client) GetOutdated() ([]OutdatedPackage, error) {
 		}
 
 		if latest, ok := formulaVersions[pkg.Name]; ok {
-			if isOutdated(installedBase, latest) {
+			if isOutdated(installedVer, latest) {
 				outdated = append(outdated, OutdatedPackage{
 					Name:           pkg.Name,
 					CurrentVersion: pkg.Version,
@@ -224,10 +239,10 @@ func (c *Client) GetOutdated() ([]OutdatedPackage, error) {
 		worker := func() {
 			defer wg.Done()
 			for pkg := range jobs {
-				installedBase := stripRevision(pkg.Version)
+				installedVer := pkg.Version
 				if pkg.IsCask {
 					cask, err := c.FetchCask(pkg.Name)
-					if err == nil && isOutdated(installedBase, cask.Version) {
+					if err == nil && isOutdated(installedVer, cask.Version) {
 						results <- OutdatedPackage{
 							Name:           pkg.Name,
 							CurrentVersion: pkg.Version,
@@ -238,8 +253,22 @@ func (c *Client) GetOutdated() ([]OutdatedPackage, error) {
 					continue
 				}
 
+				// Try tap formulas first
+				if tapVer, tapOk := c.GetTapFormulaVersion(pkg.Name); tapOk {
+					if isOutdated(installedVer, tapVer) {
+						results <- OutdatedPackage{
+							Name:           pkg.Name,
+							CurrentVersion: pkg.Version,
+							NewVersion:     tapVer,
+							IsCask:         false,
+							IsTap:          true,
+						}
+					}
+					continue
+				}
+
 				remote, err := c.FetchFormula(pkg.Name)
-				if err == nil && isOutdated(installedBase, remote.Versions.Stable) {
+				if err == nil && isOutdated(installedVer, remote.Versions.Stable) {
 					results <- OutdatedPackage{
 						Name:           pkg.Name,
 						CurrentVersion: pkg.Version,
@@ -278,14 +307,26 @@ func stripRevision(version string) string {
 	return version
 }
 
-// versionCompare compares two version strings semantically.
+// extractRevision extracts the revision number from a version string.
+// e.g. "15.2.0_1" returns 1, "15.2.0" returns 0.
+func extractRevision(version string) int {
+	if idx := strings.LastIndex(version, "_"); idx != -1 {
+		rev, err := strconv.Atoi(version[idx+1:])
+		if err == nil {
+			return rev
+		}
+	}
+	return 0
+}
+
+// versionCompare compares two version strings semantically, including revisions.
 // Returns: -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
 func versionCompare(v1, v2 string) int {
-	v1 = stripRevision(v1)
-	v2 = stripRevision(v2)
+	base1 := stripRevision(v1)
+	base2 := stripRevision(v2)
 
-	parts1 := strings.Split(v1, ".")
-	parts2 := strings.Split(v2, ".")
+	parts1 := strings.Split(base1, ".")
+	parts2 := strings.Split(base2, ".")
 
 	maxLen := len(parts1)
 	if len(parts2) > maxLen {
@@ -311,10 +352,84 @@ func versionCompare(v1, v2 string) int {
 		}
 	}
 
+	// Base versions are equal, compare revisions
+	rev1 := extractRevision(v1)
+	rev2 := extractRevision(v2)
+	if rev1 < rev2 {
+		return -1
+	}
+	if rev1 > rev2 {
+		return 1
+	}
+
 	return 0
 }
 
 // isOutdated checks if installed version is outdated compared to new version
 func isOutdated(installed, latest string) bool {
 	return versionCompare(installed, latest) < 0
+}
+
+// versionLineRegex matches lines like: version "0.46.2"
+var versionLineRegex = regexp.MustCompile(`^\s*version\s+"([^"]+)"`)
+
+// GetTapFormulaVersion scans all installed taps for a formula .rb file
+// and extracts the version from it.
+func (c *Client) GetTapFormulaVersion(name string) (string, bool) {
+	detectHomebrewPaths()
+
+	entries, err := os.ReadDir(homebrewTapsDir)
+	if err != nil {
+		return "", false
+	}
+
+	for _, userEntry := range entries {
+		if !userEntry.IsDir() {
+			continue
+		}
+		userDir := filepath.Join(homebrewTapsDir, userEntry.Name())
+		repoEntries, err := os.ReadDir(userDir)
+		if err != nil {
+			continue
+		}
+
+		for _, repoEntry := range repoEntries {
+			if !repoEntry.IsDir() {
+				continue
+			}
+			tapPath := filepath.Join(userDir, repoEntry.Name())
+
+			// Check Formula/ subdirectory and root for .rb files
+			candidatePaths := []string{
+				filepath.Join(tapPath, "Formula", name+".rb"),
+				filepath.Join(tapPath, name+".rb"),
+			}
+
+			for _, rbPath := range candidatePaths {
+				if ver, ok := parseRubyFormulaVersion(rbPath); ok {
+					return ver, true
+				}
+			}
+		}
+	}
+
+	return "", false
+}
+
+// parseRubyFormulaVersion reads a .rb formula file and extracts the version string.
+func parseRubyFormulaVersion(path string) (string, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if matches := versionLineRegex.FindStringSubmatch(line); len(matches) == 2 {
+			return matches[1], true
+		}
+	}
+	return "", false
 }

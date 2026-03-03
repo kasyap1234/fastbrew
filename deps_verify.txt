@@ -1,0 +1,3 @@
+func BenchmarkResolveDeps(b *testing.B)
+var formulae = make([]Formula, 0)
+// wait I should just examine deps_bench_test carefully

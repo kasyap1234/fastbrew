@@ -21,9 +21,19 @@ type RemoteFormula struct {
 	Desc         string   `json:"desc"`
 	Homepage     string   `json:"homepage"`
 	Versions     Versions `json:"versions"`
+	Revision     int      `json:"revision"`
 	Bottle       Bottle   `json:"bottle"`
 	Dependencies []string `json:"dependencies"`
 	KegOnly      bool     `json:"keg_only"`
+}
+
+// FullVersion returns the version string including the revision suffix.
+func (f *RemoteFormula) FullVersion() string {
+	v := f.Versions.Stable
+	if f.Revision > 0 {
+		v = fmt.Sprintf("%s_%d", v, f.Revision)
+	}
+	return v
 }
 
 type Versions struct {
