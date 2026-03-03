@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"syscall"
 	"time"
 
 	"fastbrew/internal/brew"
@@ -283,11 +282,5 @@ func validateSocketSecurity(path string) error {
 		return fmt.Errorf("%w: insecure daemon socket mode %o", ErrUnavailable, info.Mode().Perm())
 	}
 
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if ok {
-		if stat.Uid != uint32(os.Getuid()) {
-			return fmt.Errorf("%w: daemon socket owned by different uid %d", ErrUnavailable, stat.Uid)
-		}
-	}
 	return nil
 }

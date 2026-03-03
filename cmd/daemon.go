@@ -8,8 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -190,11 +188,7 @@ func startDaemonProcess(quiet bool) error {
 	if cwd, cwdErr := os.Getwd(); cwdErr == nil {
 		cmd.Dir = cwd
 	}
-	if runtime.GOOS != "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Setsid: true,
-		}
-	}
+	cmd.SysProcAttr = daemonSysProcAttr()
 
 	if err := cmd.Start(); err != nil {
 		return err
