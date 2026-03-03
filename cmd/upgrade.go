@@ -3,6 +3,7 @@ package cmd
 import (
 	"fastbrew/internal/brew"
 	"fastbrew/internal/config"
+	"fastbrew/internal/daemon"
 	"fmt"
 	"os"
 
@@ -13,7 +14,22 @@ var upgradeCmd = &cobra.Command{
 	Use:   "upgrade [package...]",
 	Short: "Upgrade packages with parallel fetching",
 	Run: func(cmd *cobra.Command, args []string) {
-		client, err := brew.NewClient()
+		pinned, _ := loadPinnedPackages()
+		pinnedList := make([]string, 0, len(pinned))
+		for name := range pinned {
+			pinnedList = append(pinnedList, name)
+		}
+
+		if ran, err := tryRunMutationJob("upgrade", daemon.JobOperationUpgrade, args, daemon.JobSubmitOptions{Pinned: pinnedList}); ran {
+			if err != nil {
+				fmt.Printf("Error upgrading: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("✅ Upgrade complete!")
+			return
+		}
+
+		client, err := newBrewClient()
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
@@ -22,31 +38,22 @@ var upgradeCmd = &cobra.Command{
 		cfg := config.Get()
 		client.MaxParallel = cfg.GetParallelDownloads()
 
-		pinned, _ := loadPinnedPackages()
+		var outdated []brew.OutdatedPackage
 
-		// Get all outdated packages once
-		outdated, err := client.GetOutdated()
-		if err != nil {
-			fmt.Printf("Error checking outdated: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Filter by requested packages if specified
 		if len(args) > 0 {
-			reqMap := make(map[string]bool)
-			for _, pkg := range args {
-				reqMap[pkg] = true
+			outdated, err = client.GetOutdatedForPackages(args)
+			if err != nil {
+				fmt.Printf("Error checking outdated: %v\n", err)
+				os.Exit(1)
 			}
-			var filtered []brew.OutdatedPackage
-			for _, pkg := range outdated {
-				if reqMap[pkg.Name] {
-					filtered = append(filtered, pkg)
-				}
+		} else {
+			outdated, err = client.GetOutdated()
+			if err != nil {
+				fmt.Printf("Error checking outdated: %v\n", err)
+				os.Exit(1)
 			}
-			outdated = filtered
 		}
 
-		// Filter out pinned packages
 		if len(pinned) > 0 {
 			var filtered []brew.OutdatedPackage
 			for _, pkg := range outdated {

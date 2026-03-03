@@ -48,6 +48,11 @@ type SearchItem struct {
 	IsCask bool
 }
 
+type indexCacheMetadata struct {
+	ETag         string `json:"etag,omitempty"`
+	LastModified string `json:"last_modified,omitempty"`
+}
+
 // IsCask checks if a package name is a cask by looking it up in the index
 func (c *Client) IsCask(name string) (bool, error) {
 	idx, err := c.LoadIndex()
@@ -102,6 +107,113 @@ func decompressFile(data []byte) ([]byte, error) {
 }
 
 func (c *Client) LoadIndex() (*Index, error) {
+	formulae, err := c.LoadFormulaIndex()
+	if err != nil {
+		return nil, err
+	}
+	casks, err := c.LoadCaskIndex()
+	if err != nil {
+		return nil, err
+	}
+	return &Index{
+		Formulae: formulae,
+		Casks:    casks,
+	}, nil
+}
+
+func (c *Client) LoadFormulaIndex() ([]Formula, error) {
+	if c.index != nil && c.index.Formulae != nil {
+		return c.index.Formulae, nil
+	}
+
+	cacheDir, err := c.GetCacheDir()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := c.ensureFreshFormulaJSON(); err != nil {
+		return nil, err
+	}
+
+	fPath := filepath.Join(cacheDir, "formula.json.zst")
+	var formulae []Formula
+	if err := loadJSON(fPath, &formulae); err != nil {
+		return nil, err
+	}
+
+	if c.index == nil {
+		c.index = &Index{}
+	}
+	c.index.Formulae = formulae
+
+	return formulae, nil
+}
+
+func (c *Client) LoadCaskIndex() ([]Cask, error) {
+	if c.index != nil && c.index.Casks != nil {
+		return c.index.Casks, nil
+	}
+
+	cacheDir, err := c.GetCacheDir()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := c.ensureFreshCaskJSON(); err != nil {
+		return nil, err
+	}
+
+	cPath := filepath.Join(cacheDir, "cask.json.zst")
+	var casks []Cask
+	if err := loadJSON(cPath, &casks); err != nil {
+		return nil, err
+	}
+
+	if c.index == nil {
+		c.index = &Index{}
+	}
+	c.index.Casks = casks
+
+	return casks, nil
+}
+
+func (c *Client) ensureFreshFormulaJSON() error {
+	cacheDir, err := c.GetCacheDir()
+	if err != nil {
+		return err
+	}
+
+	fPath := filepath.Join(cacheDir, "formula.json.zst")
+	if shouldUpdate(fPath) {
+		if c.Verbose {
+			fmt.Println("🔄 Updating Formula index...")
+		}
+		if _, err := c.downloadAndCompress(FormulaAPI, fPath, "Formula"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) ensureFreshCaskJSON() error {
+	cacheDir, err := c.GetCacheDir()
+	if err != nil {
+		return err
+	}
+
+	cPath := filepath.Join(cacheDir, "cask.json.zst")
+	if shouldUpdate(cPath) {
+		if c.Verbose {
+			fmt.Println("🔄 Updating Cask index...")
+		}
+		if _, err := c.downloadAndCompress(CaskAPI, cPath, "Cask"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) LoadIndexLegacy() (*Index, error) {
 	c.indexOnce.Do(func() {
 		if err := c.EnsureFreshJSONs(); err != nil {
 			c.indexErr = err
@@ -135,49 +247,67 @@ func (c *Client) LoadRawIndex() (*Index, error) {
 	return &idx, nil
 }
 
-func (c *Client) ForceRefreshIndex() error {
+func (c *Client) ForceRefreshIndex() (bool, error) {
 	cacheDir, err := c.GetCacheDir()
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	fmt.Println("🔄 Refreshing package index...")
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)
+	changedCh := make(chan bool, 2)
 
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if err := c.downloadAndCompress(FormulaAPI, filepath.Join(cacheDir, "formula.json.zst"), "Formula"); err != nil {
+		changed, err := c.downloadAndCompress(FormulaAPI, filepath.Join(cacheDir, "formula.json.zst"), "Formula")
+		if err != nil {
 			errCh <- err
+			return
 		}
+		changedCh <- changed
 	}()
 	go func() {
 		defer wg.Done()
-		if err := c.downloadAndCompress(CaskAPI, filepath.Join(cacheDir, "cask.json.zst"), "Cask"); err != nil {
+		changed, err := c.downloadAndCompress(CaskAPI, filepath.Join(cacheDir, "cask.json.zst"), "Cask")
+		if err != nil {
 			errCh <- err
+			return
 		}
+		changedCh <- changed
 	}()
 	wg.Wait()
 	close(errCh)
+	close(changedCh)
 
 	if len(errCh) > 0 {
-		return <-errCh
+		return false, <-errCh
+	}
+
+	anyChanged := false
+	for changed := range changedCh {
+		if changed {
+			anyChanged = true
+		}
+	}
+
+	if !anyChanged {
+		return false, nil
 	}
 
 	os.Remove(filepath.Join(cacheDir, "search.gob.zst"))
 	os.Remove(filepath.Join(cacheDir, "prefix_index.gob"))
+
 	c.prefixIndex = nil
 	c.index = nil
 	c.indexErr = nil
 	c.indexOnce = sync.Once{}
 	c.prefixIndexOnce = sync.Once{}
-	if _, err := c.GetSearchIndex(); err != nil {
-		return fmt.Errorf("failed to rebuild search index: %w", err)
-	}
+	c.notifyInvalidation(EventIndexRefreshed)
 
-	return nil
+	return true, nil
 }
 
 func (c *Client) EnsureFreshJSONs() error {
@@ -193,7 +323,7 @@ func (c *Client) EnsureFreshJSONs() error {
 		if c.Verbose {
 			fmt.Println("🔄 Updating Formula index...")
 		}
-		if err := c.downloadAndCompress(FormulaAPI, fPath, "Formula"); err != nil {
+		if _, err := c.downloadAndCompress(FormulaAPI, fPath, "Formula"); err != nil {
 			return err
 		}
 	}
@@ -201,32 +331,68 @@ func (c *Client) EnsureFreshJSONs() error {
 		if c.Verbose {
 			fmt.Println("🔄 Updating Cask index...")
 		}
-		if err := c.downloadAndCompress(CaskAPI, cPath, "Cask"); err != nil {
+		if _, err := c.downloadAndCompress(CaskAPI, cPath, "Cask"); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *Client) downloadAndCompress(url, path, label string) error {
+func (c *Client) downloadAndCompress(url, path, label string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return err
+		return false, err
+	}
+
+	metaPath := path + ".meta.json"
+	meta := loadIndexCacheMetadata(metaPath)
+	if meta.ETag != "" {
+		req.Header.Set("If-None-Match", meta.ETag)
+	}
+	if meta.LastModified != "" {
+		req.Header.Set("If-Modified-Since", meta.LastModified)
 	}
 
 	httpClient := httpclient.Get()
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotModified {
+		if c.Verbose {
+			fmt.Printf("✅ %s index is already up-to-date\n", label)
+		}
+		meta.ETag = coalesceHeader(resp.Header.Get("ETag"), meta.ETag)
+		meta.LastModified = coalesceHeader(resp.Header.Get("Last-Modified"), meta.LastModified)
+		if err := saveIndexCacheMetadata(metaPath, meta); err != nil && c.Verbose {
+			fmt.Printf("⚠️  Failed to save %s index metadata: %v\n", label, err)
+		}
+		return false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("failed to fetch %s index: %s", label, resp.Status)
+	}
+
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read response body: %w", err)
+		return false, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if existingData, err := readCachedIndexData(path); err == nil && bytes.Equal(existingData, data) {
+		if c.Verbose {
+			fmt.Printf("✅ %s index unchanged, skipping write\n", label)
+		}
+		meta.ETag = coalesceHeader(resp.Header.Get("ETag"), meta.ETag)
+		meta.LastModified = coalesceHeader(resp.Header.Get("Last-Modified"), meta.LastModified)
+		if err := saveIndexCacheMetadata(metaPath, meta); err != nil && c.Verbose {
+			fmt.Printf("⚠️  Failed to save %s index metadata: %v\n", label, err)
+		}
+		return false, nil
 	}
 
 	originalSize := len(data)
@@ -234,25 +400,30 @@ func (c *Client) downloadAndCompress(url, path, label string) error {
 	compressed, err := compressFile(data)
 	if err != nil {
 		if err := os.WriteFile(path, data, 0644); err != nil {
-			return fmt.Errorf("failed to write file: %w", err)
+			return false, fmt.Errorf("failed to write file: %w", err)
 		}
 		if c.Verbose {
 			fmt.Printf("⚠️  %s index stored uncompressed (%d bytes)\n", label, originalSize)
 		}
-		return nil
+	} else {
+		if err := os.WriteFile(path, compressed, 0644); err != nil {
+			return false, fmt.Errorf("failed to write compressed file: %w", err)
+		}
+
+		if c.Verbose {
+			ratio := float64(originalSize-len(compressed)) / float64(originalSize) * 100
+			fmt.Printf("✅ %s index compressed: %d → %d bytes (%.1f%% reduction)\n",
+				label, originalSize, len(compressed), ratio)
+		}
 	}
 
-	if err := os.WriteFile(path, compressed, 0644); err != nil {
-		return fmt.Errorf("failed to write compressed file: %w", err)
+	meta.ETag = coalesceHeader(resp.Header.Get("ETag"), meta.ETag)
+	meta.LastModified = coalesceHeader(resp.Header.Get("Last-Modified"), meta.LastModified)
+	if err := saveIndexCacheMetadata(metaPath, meta); err != nil && c.Verbose {
+		fmt.Printf("⚠️  Failed to save %s index metadata: %v\n", label, err)
 	}
 
-	if c.Verbose {
-		ratio := float64(originalSize-len(compressed)) / float64(originalSize) * 100
-		fmt.Printf("✅ %s index compressed: %d → %d bytes (%.1f%% reduction)\n",
-			label, originalSize, len(compressed), ratio)
-	}
-
-	return nil
+	return true, nil
 }
 
 func (c *Client) GetSearchIndex() ([]SearchItem, error) {
@@ -260,23 +431,29 @@ func (c *Client) GetSearchIndex() ([]SearchItem, error) {
 		return nil, err
 	}
 
-	cacheDir, _ := c.GetCacheDir()
+	cacheDir, err := c.GetCacheDir()
+	if err != nil {
+		return nil, err
+	}
 	gobPath := filepath.Join(cacheDir, "search.gob.zst")
 	prefixIndexPath := filepath.Join(cacheDir, "prefix_index.gob")
 	fPath := filepath.Join(cacheDir, "formula.json.zst")
+	cPath := filepath.Join(cacheDir, "cask.json.zst")
 
-	if isFresh(gobPath, fPath) && isFresh(prefixIndexPath, fPath) {
-		data, err := os.ReadFile(gobPath)
-		if err == nil {
-			decompressed, err := decompressFile(data)
-			if err == nil {
-				var items []SearchItem
-				if err := gob.NewDecoder(bytes.NewReader(decompressed)).Decode(&items); err == nil {
-					return items, nil
+	if isFreshAgainst(gobPath, fPath, cPath) {
+		if items, loadErr := loadSearchItemsFromGob(gobPath); loadErr == nil {
+			if !isFreshAgainst(prefixIndexPath, fPath, cPath) {
+				prefixIdx := NewPrefixIndex()
+				if buildErr := prefixIdx.BuildIndex(items); buildErr == nil {
+					if saveErr := prefixIdx.Save(prefixIndexPath); saveErr != nil && c.Verbose {
+						fmt.Printf("⚠️  Failed to save prefix index: %v\n", saveErr)
+					}
 				}
 			}
+			return items, nil
 		}
 	}
+
 	idx, err := c.LoadRawIndex()
 	if err != nil {
 		return nil, err
@@ -319,13 +496,18 @@ func (c *Client) GetSearchIndex() ([]SearchItem, error) {
 func (c *Client) GetPrefixIndex() (*PrefixIndex, error) {
 	var err error
 	c.prefixIndexOnce.Do(func() {
-		cacheDir, _ := c.GetCacheDir()
+		cacheDir, cacheErr := c.GetCacheDir()
+		if cacheErr != nil {
+			err = cacheErr
+			return
+		}
 		prefixIndexPath := filepath.Join(cacheDir, "prefix_index.gob")
 		fPath := filepath.Join(cacheDir, "formula.json.zst")
+		cPath := filepath.Join(cacheDir, "cask.json.zst")
 
 		c.prefixIndex = NewPrefixIndex()
 
-		if isFresh(prefixIndexPath, fPath) {
+		if isFreshAgainst(prefixIndexPath, fPath, cPath) {
 			if loadErr := c.prefixIndex.Load(prefixIndexPath); loadErr == nil {
 				if c.Verbose {
 					prefixCount, totalItems, avgBucket := c.prefixIndex.Stats()
@@ -393,10 +575,77 @@ func isFresh(target, source string) bool {
 
 func shouldUpdate(path string) bool {
 	info, err := os.Stat(path)
-	if os.IsNotExist(err) {
+	if err != nil {
 		return true
 	}
 	return time.Since(info.ModTime()) > 24*time.Hour
+}
+
+func isFreshAgainst(target string, sources ...string) bool {
+	for _, source := range sources {
+		if !isFresh(target, source) {
+			return false
+		}
+	}
+	return true
+}
+
+func loadSearchItemsFromGob(path string) ([]SearchItem, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	decompressed, err := decompressFile(data)
+	if err != nil {
+		decompressed = data
+	}
+
+	var items []SearchItem
+	if err := gob.NewDecoder(bytes.NewReader(decompressed)).Decode(&items); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func readCachedIndexData(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	decompressed, err := decompressFile(data)
+	if err == nil {
+		return decompressed, nil
+	}
+	return data, nil
+}
+
+func loadIndexCacheMetadata(path string) indexCacheMetadata {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return indexCacheMetadata{}
+	}
+
+	var meta indexCacheMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return indexCacheMetadata{}
+	}
+	return meta
+}
+
+func saveIndexCacheMetadata(path string, meta indexCacheMetadata) error {
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func coalesceHeader(newValue, fallback string) string {
+	if newValue != "" {
+		return newValue
+	}
+	return fallback
 }
 
 func loadJSON(path string, v interface{}) error {

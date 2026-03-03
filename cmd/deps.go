@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fastbrew/internal/brew"
 	"fmt"
 	"os"
 	"strings"
@@ -14,16 +13,31 @@ var depsCmd = &cobra.Command{
 	Short: "Show dependencies for packages (fast cached lookup)",
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		client, err := brew.NewClient()
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
+		var deps []string
+		if daemonClient, daemonErr := getDaemonClientForRead(); daemonClient != nil {
+			daemonDeps, err := daemonClient.Deps(args)
+			if err == nil {
+				deps = daemonDeps
+			} else {
+				warnDaemonFallback("deps", err)
+			}
+		} else if daemonErr != nil {
+			warnDaemonFallback("deps", daemonErr)
 		}
 
-		deps, err := client.ResolveDeps(args)
-		if err != nil {
-			fmt.Printf("Error resolving dependencies: %v\n", err)
-			os.Exit(1)
+		if deps == nil {
+			client, err := newBrewClient()
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			localDeps, depsErr := client.ResolveDeps(args)
+			if depsErr != nil {
+				fmt.Printf("Error resolving dependencies: %v\n", depsErr)
+				os.Exit(1)
+			}
+			deps = localDeps
 		}
 
 		if len(deps) == 0 {

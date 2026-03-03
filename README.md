@@ -7,7 +7,7 @@ A lightning-fast, modern alternative interface for Homebrew (Linuxbrew).
 *   **Instant Search**: Local caching of Homebrew's JSON index allows for zero-latency fuzzy search.
 *   **Parallel Downloads**: Fetches bottles in parallel before installing, significantly speeding up large installations.
 *   **Resume Downloads**: Automatically resumes interrupted downloads using HTTP Range requests.
-*   **Modern TUI**: A beautiful, keyboard-driven terminal interface powered by Bubbletea.
+*   **Modern TUI**: A beautiful, keyboard-driven terminal interface powered by Bubbletea, with inline live install progress.
 *   **Services Management**: Start, stop, restart, and list services (launchd on macOS, systemd on Linux).
 *   **Package Pinning**: Pin packages to prevent upgrades, unpin when ready.
 *   **Shell Completions**: Native completions for bash, zsh, fish, and PowerShell.
@@ -32,6 +32,7 @@ fastbrew install python nodejs go
 Just run `fastbrew` to open the interactive dashboard.
 *   Type to filter packages.
 *   Press `Enter` to install the selected package.
+*   Watch an inline job panel with per-package phases and download progress.
 *   `Ctrl+C` to quit.
 
 ### Services Management
@@ -123,4 +124,3 @@ cd fastbrew
 go build -o fastbrew main.go
 sudo mv fastbrew /usr/local/bin/
 ```
-

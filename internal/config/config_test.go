@@ -22,6 +22,21 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Verbose != false {
 		t.Error("Expected Verbose=false")
 	}
+	if cfg.Daemon.Enabled != false {
+		t.Error("Expected Daemon.Enabled=false")
+	}
+	if cfg.Daemon.AutoStart != true {
+		t.Error("Expected Daemon.AutoStart=true")
+	}
+	if cfg.Daemon.IdleTimeout != "15m" {
+		t.Errorf("Expected Daemon.IdleTimeout=15m, got %s", cfg.Daemon.IdleTimeout)
+	}
+	if cfg.Daemon.SocketPath == "" {
+		t.Error("Expected Daemon.SocketPath to be set")
+	}
+	if cfg.Daemon.Prewarm != true {
+		t.Error("Expected Daemon.Prewarm=true")
+	}
 }
 
 func TestSaveAndLoad(t *testing.T) {
@@ -37,6 +52,13 @@ func TestSaveAndLoad(t *testing.T) {
 		ShowProgress:      true,
 		AutoCleanup:       true,
 		Verbose:           true,
+		Daemon: DaemonConfig{
+			Enabled:     true,
+			AutoStart:   false,
+			IdleTimeout: "30m",
+			SocketPath:  filepath.Join(tmpDir, ".fastbrew", "run", "test.sock"),
+			Prewarm:     false,
+		},
 	}
 
 	if err := testCfg.Save(); err != nil {
@@ -62,6 +84,21 @@ func TestSaveAndLoad(t *testing.T) {
 	}
 	if loaded.Verbose != true {
 		t.Error("Expected Verbose=true")
+	}
+	if loaded.Daemon.Enabled != true {
+		t.Error("Expected Daemon.Enabled=true")
+	}
+	if loaded.Daemon.AutoStart != false {
+		t.Error("Expected Daemon.AutoStart=false")
+	}
+	if loaded.Daemon.IdleTimeout != "30m" {
+		t.Errorf("Expected Daemon.IdleTimeout=30m, got %s", loaded.Daemon.IdleTimeout)
+	}
+	if loaded.Daemon.SocketPath == "" {
+		t.Error("Expected Daemon.SocketPath to be set")
+	}
+	if loaded.Daemon.Prewarm != false {
+		t.Error("Expected Daemon.Prewarm=false")
 	}
 }
 
@@ -144,6 +181,29 @@ func TestLoadWithPartialJSON(t *testing.T) {
 	}
 	if cfg.ShowProgress != false {
 		t.Error("Expected ShowProgress to remain default (false)")
+	}
+	if cfg.Daemon.Enabled != false {
+		t.Error("Expected Daemon.Enabled to remain default (false)")
+	}
+}
+
+func TestGetDaemonHelpers(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.GetDaemonSocketPath() == "" {
+		t.Fatal("GetDaemonSocketPath should not be empty")
+	}
+	if cfg.GetDaemonIdleTimeout().String() != "15m0s" {
+		t.Fatalf("expected 15m idle timeout, got %s", cfg.GetDaemonIdleTimeout())
+	}
+
+	cfg.Daemon.IdleTimeout = "invalid"
+	if cfg.GetDaemonIdleTimeout().String() != "15m0s" {
+		t.Fatalf("invalid duration should fallback to 15m, got %s", cfg.GetDaemonIdleTimeout())
+	}
+
+	cfg.Daemon.SocketPath = ""
+	if cfg.GetDaemonSocketPath() == "" {
+		t.Fatal("empty socket path should fallback to default")
 	}
 }
 

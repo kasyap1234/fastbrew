@@ -1,0 +1,41 @@
+name: Perf Regression
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  microbench:
+    name: Microbench Budgets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Resolve deps
+        run: go mod download
+
+      - name: Benchmark internal/brew
+        run: |
+          set -euo pipefail
+          go test -run '^$' -bench BenchmarkResolveDeps -benchmem ./internal/brew | tee /tmp/bench_brew.txt
+          brew_ns="$(awk '/BenchmarkResolveDeps/{print $3}' /tmp/bench_brew.txt | tail -n1)"
+          echo "BenchmarkResolveDeps ns/op=${brew_ns}"
+          test "${brew_ns}" -le 5000000
+
+      - name: Benchmark internal/services
+        run: |
+          set -euo pipefail
+          go test -run '^$' -bench BenchmarkPlistParser_Parse -benchmem ./internal/services | tee /tmp/bench_services.txt
+          svc_ns="$(awk '/BenchmarkPlistParser_Parse/{print $3}' /tmp/bench_services.txt | tail -n1)"
+          echo "BenchmarkPlistParser_Parse ns/op=${svc_ns}"
+          test "${svc_ns}" -le 500000

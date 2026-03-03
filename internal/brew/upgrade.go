@@ -2,8 +2,6 @@ package brew
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 	"sort"
 	"sync"
 )
@@ -59,20 +57,17 @@ func (c *Client) UpgradeNative(packages []string, precomputedOutdated []Outdated
 
 	if len(caskOutdated) > 0 {
 		fmt.Printf("\n🍷 Upgrading %d cask(s)...\n", len(caskOutdated))
-		caskNames := make([]string, len(caskOutdated))
-		for i, pkg := range caskOutdated {
-			caskNames[i] = pkg.Name
+		installer := NewCaskInstaller(c)
+		installer.SetOperation(MutationOperationUpgrade)
+		for _, pkg := range caskOutdated {
 			fmt.Printf("  %s %s → %s\n", pkg.Name, pkg.CurrentVersion, pkg.NewVersion)
-		}
-		args := append([]string{"upgrade", "--cask"}, caskNames...)
-		cmd := exec.Command("brew", args...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("cask upgrade failed: %w", err)
+			if err := installer.Install(pkg.Name, c.ProgressManager); err != nil {
+				return fmt.Errorf("cask upgrade failed for %s: %w", pkg.Name, err)
+			}
 		}
 	}
 
+	c.notifyInvalidation(EventInstalledChanged)
 	return nil
 }
 
@@ -98,12 +93,19 @@ func (c *Client) upgradeFormulae(outdated []OutdatedPackage) error {
 	sem := make(chan struct{}, c.getMaxParallel())
 
 	for _, pkg := range outdated {
+		c.emitMutation(MutationOperationUpgrade, pkg.Name, MutationPhaseMetadata, MutationStatusQueued, "metadata queued", 0, 0, "")
 		wg.Add(1)
 		go func(p OutdatedPackage) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			c.emitMutation(MutationOperationUpgrade, p.Name, MutationPhaseMetadata, MutationStatusRunning, "fetching metadata", 0, 0, "")
 			remote, err := c.FetchFormula(p.Name)
+			if err != nil {
+				c.emitMutation(MutationOperationUpgrade, p.Name, MutationPhaseMetadata, MutationStatusFailed, err.Error(), 0, 0, "")
+			} else {
+				c.emitMutation(MutationOperationUpgrade, p.Name, MutationPhaseMetadata, MutationStatusSucceeded, "metadata ready", 0, 0, "")
+			}
 			metaCh <- metaResult{pkg: p, remote: remote, err: err}
 		}(pkg)
 	}
@@ -151,6 +153,9 @@ func (c *Client) upgradeFormulae(outdated []OutdatedPackage) error {
 
 	// Phase 2: Download all bottles in parallel
 	fmt.Printf("\n⬇️  Downloading %d bottle(s)...\n", len(formulae))
+	for _, f := range formulae {
+		c.emitMutation(MutationOperationUpgrade, f.Name, MutationPhaseDownload, MutationStatusQueued, "download queued", 0, 0, "bytes")
+	}
 
 	dlCh := make(chan downloadResult, len(formulae))
 
@@ -160,6 +165,7 @@ func (c *Client) upgradeFormulae(outdated []OutdatedPackage) error {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			c.emitMutation(MutationOperationUpgrade, frm.Name, MutationPhaseDownload, MutationStatusRunning, "downloading bottle", 0, 0, "bytes")
 			tarPath, err := c.DownloadBottle(frm)
 			dlCh <- downloadResult{formula: frm, tarPath: tarPath, err: err}
 		}(f)
@@ -172,8 +178,10 @@ func (c *Client) upgradeFormulae(outdated []OutdatedPackage) error {
 	for r := range dlCh {
 		if r.err != nil {
 			dlErrors = append(dlErrors, r)
+			c.emitMutation(MutationOperationUpgrade, r.formula.Name, MutationPhaseDownload, MutationStatusFailed, r.err.Error(), 0, 0, "bytes")
 		} else {
 			downloaded = append(downloaded, r)
+			c.emitMutation(MutationOperationUpgrade, r.formula.Name, MutationPhaseDownload, MutationStatusSucceeded, "downloaded bottle", 0, 0, "bytes")
 		}
 	}
 
@@ -213,6 +221,7 @@ func (c *Client) upgradeFormulae(outdated []OutdatedPackage) error {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			c.emitMutation(MutationOperationUpgrade, d.formula.Name, MutationPhaseExtract, MutationStatusRunning, "extracting bottle", 0, 0, "")
 			err := c.ExtractAndInstallBottle(d.formula, d.tarPath)
 			exCh <- extractResult{formula: d.formula, err: err}
 		}(dl)
@@ -225,8 +234,10 @@ func (c *Client) upgradeFormulae(outdated []OutdatedPackage) error {
 	for r := range exCh {
 		if r.err != nil {
 			exErrors = append(exErrors, r)
+			c.emitMutation(MutationOperationUpgrade, r.formula.Name, MutationPhaseExtract, MutationStatusFailed, r.err.Error(), 0, 0, "")
 		} else {
 			extracted = append(extracted, r.formula)
+			c.emitMutation(MutationOperationUpgrade, r.formula.Name, MutationPhaseExtract, MutationStatusSucceeded, "extracted bottle", 0, 0, "")
 		}
 	}
 
@@ -249,7 +260,7 @@ func (c *Client) upgradeFormulae(outdated []OutdatedPackage) error {
 
 	// Phase 4: Link
 	fmt.Println("\n🔗 Linking binaries...")
-	if err := c.linkParallel(extracted); err != nil {
+	if err := c.linkParallel(extracted, MutationOperationUpgrade); err != nil {
 		return err
 	}
 

@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	"fastbrew/internal/brew"
 	"fastbrew/internal/config"
+	"fastbrew/internal/daemon"
 	"fastbrew/internal/progress"
 	"fmt"
 	"os"
@@ -19,7 +19,17 @@ var installCmd = &cobra.Command{
 	Short: "Install packages with parallel downloading",
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		client, err := brew.NewClient()
+		fmt.Printf("🚀 FastBrew installing: %v\n", args)
+		if ran, err := tryRunMutationJob("install", daemon.JobOperationInstall, args, daemon.JobSubmitOptions{}); ran {
+			if err != nil {
+				fmt.Printf("Error installing packages: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("✅ Done!")
+			return
+		}
+
+		client, err := newBrewClient()
 		if err != nil {
 			fmt.Printf("Error initializing brew client: %v\n", err)
 			os.Exit(1)
@@ -35,7 +45,6 @@ var installCmd = &cobra.Command{
 			go displayProgress(client.ProgressManager)
 		}
 
-		fmt.Printf("🚀 FastBrew installing: %v\n", args)
 		if err := client.InstallNative(args); err != nil {
 			fmt.Printf("Error installing packages: %v\n", err)
 			os.Exit(1)

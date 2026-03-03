@@ -4,8 +4,6 @@ import (
 	"fastbrew/internal/tui"
 	"fmt"
 	"os"
-	"os/exec"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -24,31 +22,7 @@ It features parallel execution, a modern TUI, and zero-latency search.`,
 }
 
 func Execute() {
-	// Custom handling for unknown commands to fallback to brew
-	if len(os.Args) > 1 {
-		cmd, _, _ := rootCmd.Find(os.Args[1:])
-		if cmd == rootCmd && os.Args[1] != "help" && os.Args[1] != "-h" && os.Args[1] != "--help" {
-			// Not a known command, pass to brew
-			handleFallback(os.Args[1:])
-			return
-		}
-	}
-
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
-	}
-}
-
-func handleFallback(args []string) {
-	fmt.Printf("⏩ Passing to brew: brew %s\n", strings.Join(args, " "))
-	cmd := exec.Command("brew", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
-		}
 		os.Exit(1)
 	}
 }

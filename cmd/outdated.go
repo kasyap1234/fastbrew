@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"encoding/json"
-	"fastbrew/internal/brew"
 	"fmt"
 	"os"
 
@@ -18,16 +17,47 @@ var outdatedCmd = &cobra.Command{
 	Use:   "outdated",
 	Short: "List outdated packages (faster than brew outdated)",
 	Run: func(cmd *cobra.Command, args []string) {
-		client, err := brew.NewClient()
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
+		var outdated []OutdatedView
+
+		if daemonClient, daemonErr := getDaemonClientForRead(); daemonClient != nil {
+			daemonOutdated, err := daemonClient.Outdated()
+			if err == nil {
+				outdated = make([]OutdatedView, len(daemonOutdated))
+				for i, item := range daemonOutdated {
+					outdated[i] = OutdatedView{
+						Name:           item.Name,
+						CurrentVersion: item.CurrentVersion,
+						NewVersion:     item.NewVersion,
+						IsCask:         item.IsCask,
+					}
+				}
+			} else {
+				warnDaemonFallback("outdated", err)
+			}
+		} else if daemonErr != nil {
+			warnDaemonFallback("outdated", daemonErr)
 		}
 
-		outdated, err := client.GetOutdated()
-		if err != nil {
-			fmt.Printf("Error checking for outdated packages: %v\n", err)
-			os.Exit(1)
+		if outdated == nil {
+			client, err := newBrewClient()
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			localOutdated, outdatedErr := client.GetOutdated()
+			if outdatedErr != nil {
+				fmt.Printf("Error checking for outdated packages: %v\n", outdatedErr)
+				os.Exit(1)
+			}
+			outdated = make([]OutdatedView, len(localOutdated))
+			for i, item := range localOutdated {
+				outdated[i] = OutdatedView{
+					Name:           item.Name,
+					CurrentVersion: item.CurrentVersion,
+					NewVersion:     item.NewVersion,
+					IsCask:         item.IsCask,
+				}
+			}
 		}
 
 		if len(outdated) == 0 {
@@ -52,6 +82,13 @@ var outdatedCmd = &cobra.Command{
 		}
 
 	},
+}
+
+type OutdatedView struct {
+	Name           string `json:"name"`
+	CurrentVersion string `json:"current_version"`
+	NewVersion     string `json:"new_version"`
+	IsCask         bool   `json:"is_cask"`
 }
 
 func init() {

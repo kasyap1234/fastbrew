@@ -26,3 +26,18 @@ release-check:
 # Build binaries locally using goreleaser (snapshot mode, no publish)
 release-snapshot:
 	goreleaser release --snapshot --clean
+
+perf-bench: build
+	go run ./benchmark -mode all -runs 7
+
+perf-bench-cold: build
+	go run ./benchmark -mode cold -runs 7
+
+perf-bench-warm: build
+	go run ./benchmark -mode warm -runs 7
+
+perf-compare: build
+	go run ./benchmark -mode all -runs 11
+
+perf-profile:
+	go test -run '^$$' -bench . -benchmem ./internal/brew ./internal/services

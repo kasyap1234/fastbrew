@@ -61,6 +61,94 @@ func (c *Client) FetchCask(name string) (*RemoteCask, error) {
 	return &ck, nil
 }
 
+func (c *Client) GetOutdatedForPackages(packages []string) ([]OutdatedPackage, error) {
+	reqMap := make(map[string]bool)
+	for _, pkg := range packages {
+		reqMap[pkg] = true
+	}
+
+	installed, err := c.ListInstalledNative()
+	if err != nil {
+		return nil, err
+	}
+
+	var targetPkgs []PackageInfo
+	for _, pkg := range installed {
+		if reqMap[pkg.Name] {
+			targetPkgs = append(targetPkgs, pkg)
+		}
+	}
+
+	if len(targetPkgs) == 0 {
+		for _, name := range packages {
+			targetPkgs = append(targetPkgs, PackageInfo{Name: name, IsCask: false})
+		}
+	}
+
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return nil, err
+	}
+
+	formulaVersions := make(map[string]string, len(idx.Formulae))
+	for _, f := range idx.Formulae {
+		formulaVersions[f.Name] = f.Version
+	}
+
+	caskVersions := make(map[string]string, len(idx.Casks))
+	for _, cask := range idx.Casks {
+		caskVersions[cask.Token] = cask.Version
+	}
+
+	var outdated []OutdatedPackage
+
+	for _, pkg := range targetPkgs {
+		installedBase := stripRevision(pkg.Version)
+		if pkg.IsCask {
+			if latest, ok := caskVersions[pkg.Name]; ok && isOutdated(installedBase, latest) {
+				outdated = append(outdated, OutdatedPackage{
+					Name:           pkg.Name,
+					CurrentVersion: pkg.Version,
+					NewVersion:     latest,
+					IsCask:         true,
+				})
+			} else if !ok {
+				cask, err := c.FetchCask(pkg.Name)
+				if err == nil && isOutdated(installedBase, cask.Version) {
+					outdated = append(outdated, OutdatedPackage{
+						Name:           pkg.Name,
+						CurrentVersion: pkg.Version,
+						NewVersion:     cask.Version,
+						IsCask:         true,
+					})
+				}
+			}
+			continue
+		}
+
+		if latest, ok := formulaVersions[pkg.Name]; ok && isOutdated(installedBase, latest) {
+			outdated = append(outdated, OutdatedPackage{
+				Name:           pkg.Name,
+				CurrentVersion: pkg.Version,
+				NewVersion:     latest,
+				IsCask:         false,
+			})
+		} else if !ok {
+			remote, err := c.FetchFormula(pkg.Name)
+			if err == nil && isOutdated(installedBase, remote.Versions.Stable) {
+				outdated = append(outdated, OutdatedPackage{
+					Name:           pkg.Name,
+					CurrentVersion: pkg.Version,
+					NewVersion:     remote.Versions.Stable,
+					IsCask:         false,
+				})
+			}
+		}
+	}
+
+	return outdated, nil
+}
+
 // GetOutdated returns a list of outdated packages (formulae and casks)
 func (c *Client) GetOutdated() ([]OutdatedPackage, error) {
 	// 1. Get installed packages
@@ -96,7 +184,7 @@ func (c *Client) GetOutdated() ([]OutdatedPackage, error) {
 		installedBase := stripRevision(pkg.Version)
 		if pkg.IsCask {
 			if latest, ok := caskVersions[pkg.Name]; ok {
-				if latest != installedBase {
+				if isOutdated(installedBase, latest) {
 					outdated = append(outdated, OutdatedPackage{
 						Name:           pkg.Name,
 						CurrentVersion: pkg.Version,
@@ -111,7 +199,7 @@ func (c *Client) GetOutdated() ([]OutdatedPackage, error) {
 		}
 
 		if latest, ok := formulaVersions[pkg.Name]; ok {
-			if latest != installedBase {
+			if isOutdated(installedBase, latest) {
 				outdated = append(outdated, OutdatedPackage{
 					Name:           pkg.Name,
 					CurrentVersion: pkg.Version,
@@ -138,7 +226,7 @@ func (c *Client) GetOutdated() ([]OutdatedPackage, error) {
 				installedBase := stripRevision(pkg.Version)
 				if pkg.IsCask {
 					cask, err := c.FetchCask(pkg.Name)
-					if err == nil && cask.Version != installedBase {
+					if err == nil && isOutdated(installedBase, cask.Version) {
 						results <- OutdatedPackage{
 							Name:           pkg.Name,
 							CurrentVersion: pkg.Version,
@@ -150,7 +238,7 @@ func (c *Client) GetOutdated() ([]OutdatedPackage, error) {
 				}
 
 				remote, err := c.FetchFormula(pkg.Name)
-				if err == nil && remote.Versions.Stable != installedBase {
+				if err == nil && isOutdated(installedBase, remote.Versions.Stable) {
 					results <- OutdatedPackage{
 						Name:           pkg.Name,
 						CurrentVersion: pkg.Version,
@@ -182,11 +270,50 @@ func (c *Client) GetOutdated() ([]OutdatedPackage, error) {
 }
 
 // stripRevision removes revision suffixes like "_1" from version strings.
-// NOTE: Version comparison uses simple string equality after stripping revisions,
-// which can produce false positives (e.g., "1.0" vs "1.0.0" are treated as different).
 func stripRevision(version string) string {
 	if idx := strings.Index(version, "_"); idx != -1 {
 		return version[:idx]
 	}
 	return version
+}
+
+// versionCompare compares two version strings semantically.
+// Returns: -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
+func versionCompare(v1, v2 string) int {
+	v1 = stripRevision(v1)
+	v2 = stripRevision(v2)
+
+	parts1 := strings.Split(v1, ".")
+	parts2 := strings.Split(v2, ".")
+
+	maxLen := len(parts1)
+	if len(parts2) > maxLen {
+		maxLen = len(parts2)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		p1 := 0
+		p2 := 0
+
+		if i < len(parts1) {
+			fmt.Sscanf(parts1[i], "%d", &p1)
+		}
+		if i < len(parts2) {
+			fmt.Sscanf(parts2[i], "%d", &p2)
+		}
+
+		if p1 < p2 {
+			return -1
+		}
+		if p1 > p2 {
+			return 1
+		}
+	}
+
+	return 0
+}
+
+// isOutdated checks if installed version is outdated compared to new version
+func isOutdated(installed, latest string) bool {
+	return versionCompare(installed, latest) < 0
 }

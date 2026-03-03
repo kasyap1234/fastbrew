@@ -10,6 +10,15 @@ import (
 	"strings"
 )
 
+var (
+	plistLabelRegex     = regexp.MustCompile(`<key>Label</key>\s*<string>([^<]+)</string>`)
+	plistProgramRegex   = regexp.MustCompile(`<key>Program</key>\s*<string>([^<]+)</string>`)
+	plistRunAtLoadRegex = regexp.MustCompile(`<key>RunAtLoad</key>\s*<true\s*/?>`)
+	plistStdoutRegex    = regexp.MustCompile(`<key>StandardOutPath</key>\s*<string>([^<]+)</string>`)
+	plistStderrRegex    = regexp.MustCompile(`<key>StandardErrorPath</key>\s*<string>([^<]+)</string>`)
+	plistWorkDirRegex   = regexp.MustCompile(`<key>WorkingDirectory</key>\s*<string>([^<]+)</string>`)
+)
+
 type ServiceInfo struct {
 	Label                string
 	Program              string
@@ -43,14 +52,7 @@ func (p *PlistParser) ParseFile(path string) (*ServiceInfo, error) {
 func (p *PlistParser) Parse(data []byte, sourcePath string) (*ServiceInfo, error) {
 	content := string(data)
 
-	labelRegex := regexp.MustCompile(`<key>Label</key>\s*<string>([^<]+)</string>`)
-	programRegex := regexp.MustCompile(`<key>Program</key>\s*<string>([^<]+)</string>`)
-	runAtLoadRegex := regexp.MustCompile(`<key>RunAtLoad</key>\s*<true\s*/?>`)
-	stdoutRegex := regexp.MustCompile(`<key>StandardOutPath</key>\s*<string>([^<]+)</string>`)
-	stderrRegex := regexp.MustCompile(`<key>StandardErrorPath</key>\s*<string>([^<]+)</string>`)
-	workDirRegex := regexp.MustCompile(`<key>WorkingDirectory</key>\s*<string>([^<]+)</string>`)
-
-	labelMatch := labelRegex.FindStringSubmatch(content)
+	labelMatch := plistLabelRegex.FindStringSubmatch(content)
 	if len(labelMatch) < 2 {
 		return nil, InvalidPlistError{
 			Path:  sourcePath,
@@ -64,21 +66,21 @@ func (p *PlistParser) Parse(data []byte, sourcePath string) (*ServiceInfo, error
 		EnvironmentVariables: make(map[string]string),
 	}
 
-	if programMatch := programRegex.FindStringSubmatch(content); len(programMatch) >= 2 {
+	if programMatch := plistProgramRegex.FindStringSubmatch(content); len(programMatch) >= 2 {
 		info.Program = programMatch[1]
 	}
 
-	info.RunAtLoad = runAtLoadRegex.MatchString(content)
+	info.RunAtLoad = plistRunAtLoadRegex.MatchString(content)
 
-	if stdoutMatch := stdoutRegex.FindStringSubmatch(content); len(stdoutMatch) >= 2 {
+	if stdoutMatch := plistStdoutRegex.FindStringSubmatch(content); len(stdoutMatch) >= 2 {
 		info.StandardOutPath = stdoutMatch[1]
 	}
 
-	if stderrMatch := stderrRegex.FindStringSubmatch(content); len(stderrMatch) >= 2 {
+	if stderrMatch := plistStderrRegex.FindStringSubmatch(content); len(stderrMatch) >= 2 {
 		info.StandardErrorPath = stderrMatch[1]
 	}
 
-	if workDirMatch := workDirRegex.FindStringSubmatch(content); len(workDirMatch) >= 2 {
+	if workDirMatch := plistWorkDirRegex.FindStringSubmatch(content); len(workDirMatch) >= 2 {
 		info.WorkingDirectory = workDirMatch[1]
 	}
 

@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fastbrew/internal/brew"
 	"fmt"
 	"os"
 
@@ -12,18 +11,23 @@ var updateCmd = &cobra.Command{
 	Use:   "update",
 	Short: "Update Homebrew and FastBrew index in parallel",
 	Run: func(cmd *cobra.Command, args []string) {
-		client, err := brew.NewClient()
+		client, err := newBrewClient()
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
 		}
 
 		fmt.Println("🔄 Updating FastBrew index...")
-		if err := client.ForceRefreshIndex(); err != nil {
+		changed, err := client.ForceRefreshIndex()
+		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("✅ Index updated!")
+		if changed {
+			fmt.Println("✅ Index updated!")
+			return
+		}
+		fmt.Println("Already up-to-date.")
 	},
 }
 

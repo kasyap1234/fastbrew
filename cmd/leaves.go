@@ -12,7 +12,20 @@ var leavesCmd = &cobra.Command{
 	Use:   "leaves",
 	Short: "List installed formulae that are not dependencies of another installed formula",
 	Run: func(cmd *cobra.Command, args []string) {
-		client, err := brew.NewClient()
+		if daemonClient, daemonErr := getDaemonClientForRead(); daemonClient != nil {
+			leaves, err := daemonClient.Leaves()
+			if err == nil {
+				for _, name := range leaves {
+					fmt.Println(name)
+				}
+				return
+			}
+			warnDaemonFallback("leaves", err)
+		} else if daemonErr != nil {
+			warnDaemonFallback("leaves", daemonErr)
+		}
+
+		client, err := newBrewClient()
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)

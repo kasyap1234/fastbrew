@@ -18,7 +18,7 @@ var tapCmd = &cobra.Command{
 With no arguments, lists all taps.
 With a repo argument, adds the tap.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		tapManager, err := brew.NewTapManager()
+		tapManager, err := newTapManager()
 		if err != nil {
 			fmt.Printf("Error initializing tap manager: %v\n", err)
 			os.Exit(1)
@@ -38,7 +38,7 @@ var untapCmd = &cobra.Command{
 	Long:  `Removes a previously tapped repository.`,
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		tapManager, err := brew.NewTapManager()
+		tapManager, err := newTapManager()
 		if err != nil {
 			fmt.Printf("Error initializing tap manager: %v\n", err)
 			os.Exit(1)
@@ -55,13 +55,24 @@ var tapInfoCmd = &cobra.Command{
 	Long:  `Display detailed information about a tap including formulae and casks.`,
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		tapManager, err := brew.NewTapManager()
+		installedOnly, _ := cmd.Flags().GetBool("installed")
+		if daemonClient, daemonErr := getDaemonClientForRead(); daemonClient != nil {
+			info, err := daemonClient.TapInfo(args[0], installedOnly)
+			if err == nil {
+				printTapInfo(info, installedOnly)
+				return
+			}
+			warnDaemonFallback("tap-info", err)
+		} else if daemonErr != nil {
+			warnDaemonFallback("tap-info", daemonErr)
+		}
+
+		tapManager, err := newTapManager()
 		if err != nil {
 			fmt.Printf("Error initializing tap manager: %v\n", err)
 			os.Exit(1)
 		}
 
-		installedOnly, _ := cmd.Flags().GetBool("installed")
 		showTapInfo(tapManager, args[0], installedOnly)
 	},
 }
@@ -144,6 +155,10 @@ func showTapInfo(tm *brew.TapManager, repo string, installedOnly bool) {
 		os.Exit(1)
 	}
 
+	printTapInfo(info, installedOnly)
+}
+
+func printTapInfo(info *brew.TapInfo, installedOnly bool) {
 	fmt.Printf("📦 %s\n", info.Tap.Name)
 	fmt.Println(strings.Repeat("=", 40))
 

@@ -5,13 +5,23 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
+type DaemonConfig struct {
+	Enabled     bool   `json:"enabled"`
+	AutoStart   bool   `json:"auto_start"`
+	IdleTimeout string `json:"idle_timeout"`
+	SocketPath  string `json:"socket_path"`
+	Prewarm     bool   `json:"prewarm"`
+}
+
 type Config struct {
-	ParallelDownloads int  `json:"parallel_downloads"`
-	ShowProgress      bool `json:"show_progress"`
-	AutoCleanup       bool `json:"auto_cleanup"`
-	Verbose           bool `json:"verbose"`
+	ParallelDownloads int          `json:"parallel_downloads"`
+	ShowProgress      bool         `json:"show_progress"`
+	AutoCleanup       bool         `json:"auto_cleanup"`
+	Verbose           bool         `json:"verbose"`
+	Daemon            DaemonConfig `json:"daemon"`
 }
 
 var (
@@ -25,7 +35,19 @@ func DefaultConfig() *Config {
 		ShowProgress:      false,
 		AutoCleanup:       false,
 		Verbose:           false,
+		Daemon: DaemonConfig{
+			Enabled:     false,
+			AutoStart:   true,
+			IdleTimeout: "15m",
+			SocketPath:  DefaultDaemonSocketPath(),
+			Prewarm:     true,
+		},
 	}
+}
+
+func DefaultDaemonSocketPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".fastbrew", "run", "daemon.sock")
 }
 
 func GetConfigPath() string {
@@ -75,4 +97,19 @@ func (c *Config) GetParallelDownloads() int {
 		return 20
 	}
 	return c.ParallelDownloads
+}
+
+func (c *Config) GetDaemonSocketPath() string {
+	if c.Daemon.SocketPath == "" {
+		return DefaultDaemonSocketPath()
+	}
+	return c.Daemon.SocketPath
+}
+
+func (c *Config) GetDaemonIdleTimeout() time.Duration {
+	d, err := time.ParseDuration(c.Daemon.IdleTimeout)
+	if err != nil || d <= 0 {
+		return 15 * time.Minute
+	}
+	return d
 }

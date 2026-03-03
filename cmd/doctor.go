@@ -15,7 +15,7 @@ var doctorCmd = &cobra.Command{
 	Short: "Check system for potential problems",
 	Long:  `Run comprehensive diagnostics on your Homebrew installation to identify issues and suggest fixes.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		client, err := brew.NewClient()
+		client, err := newBrewClient()
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)

@@ -22,7 +22,7 @@ var linkCmd = &cobra.Command{
 	Long:  `Link a formula's installed files into the Homebrew prefix, making them available in PATH.`,
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		client, err := brew.NewClient()
+		client, err := newBrewClient()
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
@@ -79,7 +79,7 @@ var unlinkCmd = &cobra.Command{
 	Long:  `Unlink a formula's symlinks from the Homebrew prefix, removing them from PATH.`,
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		client, err := brew.NewClient()
+		client, err := newBrewClient()
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)

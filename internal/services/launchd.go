@@ -302,3 +302,35 @@ func (m *LaunchdManager) Restart(serviceName string) error {
 	}
 	return m.Start(serviceName)
 }
+
+func (m *LaunchdManager) Enable(serviceName string) error {
+	plistPath := m.findPlistPath(serviceName)
+	if plistPath == "" {
+		return ServiceNotFoundError{Name: serviceName}
+	}
+
+	_, err := m.runner.Run("launchctl", "load", "-w", plistPath)
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return LaunchctlError{Command: "load", Cause: err, Output: string(exitErr.Stderr)}
+		}
+		return LaunchctlError{Command: "load", Cause: err}
+	}
+	return nil
+}
+
+func (m *LaunchdManager) Disable(serviceName string) error {
+	plistPath := m.findPlistPath(serviceName)
+	if plistPath == "" {
+		return ServiceNotFoundError{Name: serviceName}
+	}
+
+	_, err := m.runner.Run("launchctl", "unload", "-w", plistPath)
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return LaunchctlError{Command: "unload", Cause: err, Output: string(exitErr.Stderr)}
+		}
+		return LaunchctlError{Command: "unload", Cause: err}
+	}
+	return nil
+}

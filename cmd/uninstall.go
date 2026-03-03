@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fastbrew/internal/brew"
+	"fastbrew/internal/daemon"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,12 +15,21 @@ var uninstallCmd = &cobra.Command{
 	Short: "Uninstall packages (native fast removal)",
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		client, err := brew.NewClient()
+		if ran, err := tryRunMutationJob("uninstall", daemon.JobOperationUninstall, args, daemon.JobSubmitOptions{}); ran {
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
+		client, err := newBrewClient()
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
 		}
 
+		removedAny := false
 		for _, pkg := range args {
 			pkgPath := filepath.Join(client.Cellar, pkg)
 
@@ -41,6 +51,11 @@ var uninstallCmd = &cobra.Command{
 			}
 
 			fmt.Printf("✅ Uninstalled %s\n", pkg)
+			removedAny = true
+		}
+
+		if removedAny {
+			notifyDaemonInvalidation(brew.EventInstalledChanged)
 		}
 	},
 }

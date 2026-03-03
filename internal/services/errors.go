@@ -116,3 +116,5 @@ func (e SystemctlError) Error() string {
 func (e SystemctlError) Unwrap() error {
 	return e.Cause
 }
+
+var ErrInvalidScope = fmt.Errorf("invalid service scope: must be 'user', 'system', or 'all'")

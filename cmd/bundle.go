@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fastbrew/internal/brew"
 	"fastbrew/internal/bundle"
 	"fmt"
 	"os"
@@ -60,13 +61,67 @@ var bundleInstallCmd = &cobra.Command{
 			fmt.Printf("Installing from %s...\n", file)
 		}
 
-		fmt.Println("Bundle install not yet fully implemented. Parsed successfully.")
-		fmt.Printf("Found %d brews, %d casks, %d taps, %d mas apps\n",
-			len(brewfile.GetBrews()),
-			len(brewfile.GetCasks()),
-			len(brewfile.GetTaps()),
-			len(brewfile.GetMasApps()),
-		)
+		client, err := newBrewClient()
+		if err != nil {
+			fmt.Printf("Error creating client: %v\n", err)
+			os.Exit(1)
+		}
+
+		taps := brewfile.GetTaps()
+		if len(taps) > 0 {
+			fmt.Printf("📦 Tapping %d repositories...\n", len(taps))
+			tapManager, err := newTapManager()
+			if err != nil {
+				fmt.Printf("Error initializing tap manager: %v\n", err)
+				os.Exit(1)
+			}
+			for _, tap := range taps {
+				tapRepo := fmt.Sprintf("%s/%s", tap.User, tap.Repo)
+				fmt.Printf("  tap: %s\n", tapRepo)
+				if err := tapManager.Tap(tapRepo, false); err != nil {
+					fmt.Printf("  ⚠️  Warning: failed to tap %s: %v\n", tapRepo, err)
+				}
+			}
+		}
+
+		casks := brewfile.GetCasks()
+		if len(casks) > 0 {
+			fmt.Printf("🍷 Installing %d casks...\n", len(casks))
+			installer := brew.NewCaskInstaller(client)
+			for _, cask := range casks {
+				if verbose {
+					fmt.Printf("  Installing cask: %s\n", cask.Name)
+				}
+				if err := installer.Install(cask.Name, client.ProgressManager); err != nil {
+					fmt.Printf("  ⚠️  Error installing cask %s: %v\n", cask.Name, err)
+				} else if verbose {
+					fmt.Printf("  ✅ %s installed\n", cask.Name)
+				}
+			}
+		}
+
+		brews := brewfile.GetBrews()
+		if len(brews) > 0 {
+			fmt.Printf("🍺 Installing %d formulae...\n", len(brews))
+			formulae := make([]string, len(brews))
+			for i, b := range brews {
+				formulae[i] = b.Name
+			}
+			if err := client.InstallNative(formulae); err != nil {
+				fmt.Printf("Error installing formulae: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
+		masApps := brewfile.GetMasApps()
+		if len(masApps) > 0 {
+			fmt.Printf("📱 Found %d Mac App Store apps (not yet supported)\n", len(masApps))
+			for _, mas := range masApps {
+				fmt.Printf("  mas: %s (id: %d)\n", mas.Name, mas.ID)
+			}
+		}
+
+		fmt.Println("✅ Bundle install complete!")
 	},
 }
 
@@ -145,13 +200,63 @@ var bundleCheckCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		fmt.Println("Bundle check not yet fully implemented. Parsed successfully.")
-		fmt.Printf("Brewfile contains %d brews, %d casks, %d taps, %d mas apps\n",
-			len(brewfile.GetBrews()),
-			len(brewfile.GetCasks()),
-			len(brewfile.GetTaps()),
-			len(brewfile.GetMasApps()),
-		)
+		client, err := newBrewClient()
+		if err != nil {
+			fmt.Printf("Error creating client: %v\n", err)
+			os.Exit(1)
+		}
+
+		installed, err := client.ListInstalledNative()
+		if err != nil {
+			fmt.Printf("Error listing installed: %v\n", err)
+			os.Exit(1)
+		}
+
+		installedMap := make(map[string]bool)
+		for _, pkg := range installed {
+			installedMap[pkg.Name] = true
+		}
+
+		var missing []string
+
+		tapManager, tapErr := newTapManager()
+		if tapErr != nil {
+			fmt.Printf("Error initializing tap manager: %v\n", tapErr)
+			os.Exit(1)
+		}
+
+		for _, tap := range brewfile.GetTaps() {
+			tapRepo := fmt.Sprintf("%s/%s", tap.User, tap.Repo)
+			_, exists := tapManager.GetTap(tapRepo)
+			if !exists {
+				localPath := filepath.Join("/opt/homebrew/Library/Taps", tap.User, "homebrew-"+tap.Repo)
+				if _, err := os.Stat(localPath); os.IsNotExist(err) {
+					missing = append(missing, "tap: "+tapRepo)
+				}
+			}
+		}
+
+		for _, cask := range brewfile.GetCasks() {
+			if !installedMap[cask.Name] {
+				missing = append(missing, "cask: "+cask.Name)
+			}
+		}
+
+		for _, brew := range brewfile.GetBrews() {
+			if !installedMap[brew.Name] {
+				missing = append(missing, "brew: "+brew.Name)
+			}
+		}
+
+		if len(missing) > 0 {
+			fmt.Println("❌ The following dependencies are missing:")
+			for _, m := range missing {
+				fmt.Printf("  %s\n", m)
+			}
+			os.Exit(1)
+		}
+
+		fmt.Println("✅ All dependencies are satisfied")
 	},
 }
 

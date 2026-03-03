@@ -1,13 +1,10 @@
 package brew
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"fastbrew/internal/retry"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,8 +12,39 @@ import (
 
 // Fetch downloads the package bottle/source
 func (c *Client) Fetch(pkg string) error {
-	cmd := exec.Command("brew", "fetch", pkg)
-	return cmd.Run()
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return err
+	}
+
+	isCask := false
+	for _, cask := range idx.Casks {
+		if cask.Token == pkg {
+			isCask = true
+			break
+		}
+	}
+
+	if isCask {
+		metadata, err := c.FetchCaskMetadata(pkg)
+		if err != nil {
+			return err
+		}
+		installer := NewCaskInstaller(c)
+		caskDir, err := installer.getCaskVersionDir(pkg, metadata.Version)
+		if err != nil {
+			return err
+		}
+		destPath := filepath.Join(caskDir, filepath.Base(metadata.URL))
+		return installer.downloadArtifact(pkg, metadata.URL, destPath, metadata.SHA256, c.ProgressManager)
+	}
+
+	f, err := c.FetchFormula(pkg)
+	if err != nil {
+		return err
+	}
+	_, _, err = f.GetBottleInfo()
+	return err
 }
 
 // InstallNative performs native installation by resolving deps, downloading bottles, and linking.
@@ -49,19 +77,20 @@ func (c *Client) InstallNative(packages []string) error {
 		}
 	}
 
-	// Install casks using brew install --cask
+	// Install casks using native installer
 	if len(casks) > 0 {
 		fmt.Printf("🍷 Installing casks: %v\n", casks)
-		args := append([]string{"install", "--cask"}, casks...)
-		cmd := exec.Command("brew", args...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("cask installation failed: %w", err)
+		installer := NewCaskInstaller(c)
+		installer.SetOperation(MutationOperationInstall)
+		for _, cask := range casks {
+			if err := installer.Install(cask, c.ProgressManager); err != nil {
+				return fmt.Errorf("cask installation failed for %s: %w", cask, err)
+			}
 		}
 		fmt.Println("✅ Casks installed successfully")
 	}
 
+	c.notifyInvalidation(EventInstalledChanged)
 	return nil
 }
 
@@ -117,15 +146,22 @@ func (c *Client) installFormulaeWithIndex(packages []string, idx *Index) error {
 
 	ctx := context.Background()
 	for _, name := range neededList {
+		c.emitMutation(MutationOperationInstall, name, MutationPhaseMetadata, MutationStatusQueued, "metadata queued", 0, 0, "")
 		fetchWg.Add(1)
 		go func(n string) {
 			defer fetchWg.Done()
 			fetchSem <- struct{}{}
 			defer func() { <-fetchSem }()
 
+			c.emitMutation(MutationOperationInstall, n, MutationPhaseMetadata, MutationStatusRunning, "fetching metadata", 0, 0, "")
 			f, err := retry.WithResult(ctx, func() (*RemoteFormula, error) {
 				return c.FetchFormula(n)
 			})
+			if err != nil {
+				c.emitMutation(MutationOperationInstall, n, MutationPhaseMetadata, MutationStatusFailed, err.Error(), 0, 0, "")
+			} else {
+				c.emitMutation(MutationOperationInstall, n, MutationPhaseMetadata, MutationStatusSucceeded, "metadata ready", 0, 0, "")
+			}
 			results <- fetchResult{formula: f, err: err}
 		}(name)
 	}
@@ -164,6 +200,9 @@ func (c *Client) installFormulaeWithIndex(packages []string, idx *Index) error {
 	for _, pkg := range packages {
 		buildQueue(pkg)
 	}
+	for _, f := range installQueue {
+		c.emitMutation(MutationOperationInstall, f.Name, MutationPhaseDownload, MutationStatusQueued, "download queued", 0, 0, "bytes")
+	}
 
 	fmt.Printf("📦 Found %d formulae to install.\n", len(installQueue))
 
@@ -186,6 +225,7 @@ func (c *Client) installFormulaeWithIndex(packages []string, idx *Index) error {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			c.emitMutation(MutationOperationInstall, frm.Name, MutationPhaseDownload, MutationStatusRunning, "downloading bottle", 0, 0, "bytes")
 			tarPath, err := c.DownloadBottle(frm)
 			dlCh <- downloadResult{formula: frm, tarPath: tarPath, err: err}
 		}(f)
@@ -199,9 +239,11 @@ func (c *Client) installFormulaeWithIndex(packages []string, idx *Index) error {
 		if r.err != nil {
 			dlErrors = append(dlErrors, fmt.Errorf("failed to download %s: %w", r.formula.Name, r.err))
 			fmt.Printf("  ❌ Failed to download %s: %v\n", r.formula.Name, r.err)
+			c.emitMutation(MutationOperationInstall, r.formula.Name, MutationPhaseDownload, MutationStatusFailed, r.err.Error(), 0, 0, "bytes")
 		} else {
 			downloaded = append(downloaded, r)
 			fmt.Printf("  ✅ Downloaded %s\n", r.formula.Name)
+			c.emitMutation(MutationOperationInstall, r.formula.Name, MutationPhaseDownload, MutationStatusSucceeded, "downloaded bottle", 0, 0, "bytes")
 		}
 	}
 
@@ -226,6 +268,7 @@ func (c *Client) installFormulaeWithIndex(packages []string, idx *Index) error {
 			defer wg.Done()
 			extractSem <- struct{}{}
 			defer func() { <-extractSem }()
+			c.emitMutation(MutationOperationInstall, d.formula.Name, MutationPhaseExtract, MutationStatusRunning, "extracting bottle", 0, 0, "")
 			err := c.ExtractAndInstallBottle(d.formula, d.tarPath)
 			exCh <- extractResult{formula: d.formula, err: err}
 		}(dl)
@@ -238,8 +281,10 @@ func (c *Client) installFormulaeWithIndex(packages []string, idx *Index) error {
 		if r.err != nil {
 			installErrors = append(installErrors, fmt.Errorf("failed to extract %s: %w", r.formula.Name, r.err))
 			fmt.Printf("  ❌ Failed to extract %s: %v\n", r.formula.Name, r.err)
+			c.emitMutation(MutationOperationInstall, r.formula.Name, MutationPhaseExtract, MutationStatusFailed, r.err.Error(), 0, 0, "")
 		} else {
 			fmt.Printf("  ✅ Extracted %s\n", r.formula.Name)
+			c.emitMutation(MutationOperationInstall, r.formula.Name, MutationPhaseExtract, MutationStatusSucceeded, "extracted bottle", 0, 0, "")
 		}
 	}
 
@@ -264,6 +309,7 @@ func (c *Client) installFormulaeWithIndex(packages []string, idx *Index) error {
 	}
 
 	for _, f := range kegOnlyQueue {
+		c.emitMutation(MutationOperationInstall, f.Name, MutationPhaseLink, MutationStatusRunning, "linking keg-only package", 0, 0, "")
 		optDir := filepath.Join(c.Prefix, "opt")
 		optLink := filepath.Join(optDir, f.Name)
 		os.MkdirAll(optDir, 0755)
@@ -273,12 +319,16 @@ func (c *Client) installFormulaeWithIndex(packages []string, idx *Index) error {
 			}
 		}
 		cellarPath := filepath.Join(c.Prefix, "Cellar", f.Name, f.Versions.Stable)
-		os.Symlink(cellarPath, optLink)
+		if err := os.Symlink(cellarPath, optLink); err != nil {
+			c.emitMutation(MutationOperationInstall, f.Name, MutationPhaseLink, MutationStatusFailed, err.Error(), 0, 0, "")
+			continue
+		}
+		c.emitMutation(MutationOperationInstall, f.Name, MutationPhaseLink, MutationStatusSucceeded, "keg-only link ready", 0, 0, "")
 		fmt.Printf("  🔗 %s (keg-only) → opt/%s\n", f.Name, f.Name)
 	}
 
 	fmt.Println("🔗 Linking binaries...")
-	if err := c.linkParallel(linkQueue); err != nil {
+	if err := c.linkParallel(linkQueue, MutationOperationInstall); err != nil {
 		return err
 	}
 
@@ -294,9 +344,7 @@ func (c *Client) installFormulae(packages []string) error {
 	return c.installFormulaeWithIndex(packages, idx)
 }
 
-func (c *Client) linkParallel(installQueue []*RemoteFormula) error {
-	const numWorkers = 5
-
+func (c *Client) linkParallel(installQueue []*RemoteFormula, operation string) error {
 	conflictTracker := NewConflictTracker()
 
 	fmt.Println("  📋 Detecting conflicts...")
@@ -329,13 +377,18 @@ func (c *Client) linkParallel(installQueue []*RemoteFormula) error {
 		fmt.Printf("  🔗 Linking %d packages...\n", len(parallelQueue))
 
 		for _, f := range parallelQueue {
+			c.emitMutation(operation, f.Name, MutationPhaseLink, MutationStatusRunning, "linking package", 0, 0, "")
 			result, err := c.Link(f.Name, f.Versions.Stable)
 			if err != nil {
 				fmt.Printf("  ❌ Failed to link %s: %v\n", f.Name, err)
+				c.emitMutation(operation, f.Name, MutationPhaseLink, MutationStatusFailed, err.Error(), 0, 0, "")
 				continue
 			}
 			if result.Success {
 				fmt.Printf("  ✅ Linked %s\n", f.Name)
+				c.emitMutation(operation, f.Name, MutationPhaseLink, MutationStatusSucceeded, "linked successfully", 0, 0, "")
+			} else {
+				c.emitMutation(operation, f.Name, MutationPhaseLink, MutationStatusFailed, "link completed with errors", 0, 0, "")
 			}
 		}
 	}
@@ -352,9 +405,11 @@ func (c *Client) linkParallel(installQueue []*RemoteFormula) error {
 		}
 
 		for _, f := range sequentialQueue {
+			c.emitMutation(operation, f.Name, MutationPhaseLink, MutationStatusRunning, "linking package", 0, 0, "")
 			result, err := c.Link(f.Name, f.Versions.Stable)
 			if err != nil {
 				fmt.Printf("  ❌ Failed to link %s: %v\n", f.Name, err)
+				c.emitMutation(operation, f.Name, MutationPhaseLink, MutationStatusFailed, err.Error(), 0, 0, "")
 				continue
 			}
 
@@ -367,6 +422,9 @@ func (c *Client) linkParallel(installQueue []*RemoteFormula) error {
 
 			if result.Success {
 				fmt.Printf("  ✅ Linked %s\n", f.Name)
+				c.emitMutation(operation, f.Name, MutationPhaseLink, MutationStatusSucceeded, "linked successfully", 0, 0, "")
+			} else {
+				c.emitMutation(operation, f.Name, MutationPhaseLink, MutationStatusFailed, "link completed with errors", 0, 0, "")
 			}
 		}
 	}
@@ -457,10 +515,10 @@ func (c *Client) ResolveDeps(packages []string) ([]string, error) {
 	return unique(deps), nil
 }
 
-// UpgradeParallel identifies outdated packages and fetches them in parallel
+// UpgradeParallel identifies outdated packages and upgrades them natively
 func (c *Client) UpgradeParallel(packages []string) error {
 	fmt.Println("🔍 Checking for outdated packages...")
-	outdated, err := c.getOutdated(packages)
+	outdated, err := c.GetOutdated()
 	if err != nil {
 		return err
 	}
@@ -470,12 +528,17 @@ func (c *Client) UpgradeParallel(packages []string) error {
 		return nil
 	}
 
-	fmt.Printf("📦 Found %d packages to upgrade. Fetching in parallel...\n", len(outdated))
+	var outdatedNames []string
+	for _, pkg := range outdated {
+		outdatedNames = append(outdatedNames, pkg.Name)
+	}
+
+	fmt.Printf("📦 Found %d packages to upgrade. Fetching in parallel...\n", len(outdatedNames))
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, c.getMaxParallel())
-	fetchErrChan := make(chan error, len(outdated))
-	for _, pkg := range outdated {
+	fetchErrChan := make(chan error, len(outdatedNames))
+	for _, pkg := range outdatedNames {
 		wg.Add(1)
 		go func(p string) {
 			defer wg.Done()
@@ -494,38 +557,7 @@ func (c *Client) UpgradeParallel(packages []string) error {
 		return err
 	}
 
-	fmt.Println("💿 Upgrading...")
-	args := append([]string{"upgrade"}, outdated...)
-	cmd := exec.Command("brew", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-func (c *Client) getOutdated(packages []string) ([]string, error) {
-	args := []string{"outdated", "--quiet"}
-	if len(packages) > 0 {
-		args = append(args, packages...)
-	}
-	cmd := exec.Command("brew", args...)
-	out, err := cmd.Output()
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-			_ = exitErr
-		} else {
-			return nil, err
-		}
-	}
-
-	var list []string
-	scanner := bufio.NewScanner(bytes.NewReader(out))
-	for scanner.Scan() {
-		pkg := strings.TrimSpace(scanner.Text())
-		if pkg != "" {
-			list = append(list, pkg)
-		}
-	}
-	return list, nil
+	return c.UpgradeNative(nil, outdated)
 }
 
 func unique(slice []string) []string {

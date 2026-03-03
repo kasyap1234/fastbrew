@@ -2,9 +2,9 @@ package cmd
 
 import (
 	"fastbrew/internal/brew"
+	"fastbrew/internal/daemon"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -22,7 +22,15 @@ var reinstallCmd = &cobra.Command{
 	Long:  `Reinstall a formula by first uninstalling it, then installing it again.`,
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		client, err := brew.NewClient()
+		if ran, err := tryRunMutationJob("reinstall", daemon.JobOperationReinstall, args, daemon.JobSubmitOptions{}); ran {
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
+		client, err := newBrewClient()
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
@@ -33,11 +41,13 @@ var reinstallCmd = &cobra.Command{
 
 			isCask, _ := client.IsCask(pkg)
 			if isCask {
-				fmt.Println("  🍷 Reinstalling cask via brew...")
-				cmd := exec.Command("brew", "reinstall", "--cask", pkg)
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				if err := cmd.Run(); err != nil {
+				fmt.Println("  🍷 Reinstalling cask...")
+				installer := brew.NewCaskInstaller(client)
+				installer.SetOperation(brew.MutationOperationReinstall)
+				if err := installer.Uninstall(pkg); err != nil {
+					fmt.Printf("  ⚠️  Uninstall warning: %v\n", err)
+				}
+				if err := installer.Install(pkg, client.ProgressManager); err != nil {
 					fmt.Printf("  ❌ Error reinstalling cask: %v\n", err)
 				} else {
 					fmt.Printf("  ✅ %s reinstalled successfully!\n", pkg)

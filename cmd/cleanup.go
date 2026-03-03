@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fastbrew/internal/brew"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,7 +13,7 @@ var cleanupCmd = &cobra.Command{
 	Use:   "cleanup",
 	Short: "Remove old versions of installed formulae and clear cache",
 	Run: func(cmd *cobra.Command, args []string) {
-		client, err := brew.NewClient()
+		client, err := newBrewClient()
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)

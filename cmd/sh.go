@@ -3,9 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -38,14 +36,7 @@ var shCmd = &cobra.Command{
 		}
 
 		if prefix == "" {
-			out, err := exec.Command("brew", "--prefix").Output()
-			if err == nil {
-				prefix = strings.TrimSpace(string(out))
-			}
-		}
-
-		if prefix == "" {
-			fmt.Fprintln(os.Stderr, "Error: Could not determine Homebrew prefix")
+			fmt.Fprintln(os.Stderr, "Error: Could not determine Homebrew prefix. Set HOMEBREW_PREFIX environment variable")
 			os.Exit(1)
 		}
 

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
 )
@@ -136,12 +135,6 @@ func detectHomebrewPrefix() string {
 		if _, err := os.Stat(path); err == nil {
 			return path
 		}
-	}
-
-	cmd := exec.Command("brew", "--prefix")
-	out, err := cmd.Output()
-	if err == nil {
-		return strings.TrimSpace(string(out))
 	}
 
 	return "/usr/local"
