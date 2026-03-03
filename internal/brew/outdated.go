@@ -6,6 +6,7 @@ import (
 	"fastbrew/internal/httpclient"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -92,7 +93,7 @@ func (c *Client) GetOutdatedForPackages(packages []string) ([]OutdatedPackage, e
 
 	formulaVersions := make(map[string]string, len(idx.Formulae))
 	for _, f := range idx.Formulae {
-		formulaVersions[f.Name] = f.Version
+		formulaVersions[f.Name] = f.Versions.Stable
 	}
 
 	caskVersions := make(map[string]string, len(idx.Casks))
@@ -168,7 +169,7 @@ func (c *Client) GetOutdated() ([]OutdatedPackage, error) {
 
 	formulaVersions := make(map[string]string, len(idx.Formulae))
 	for _, f := range idx.Formulae {
-		formulaVersions[f.Name] = f.Version
+		formulaVersions[f.Name] = f.Versions.Stable
 	}
 
 	caskVersions := make(map[string]string, len(idx.Casks))
@@ -296,10 +297,10 @@ func versionCompare(v1, v2 string) int {
 		p2 := 0
 
 		if i < len(parts1) {
-			fmt.Sscanf(parts1[i], "%d", &p1)
+			p1, _ = strconv.Atoi(parts1[i])
 		}
 		if i < len(parts2) {
-			fmt.Sscanf(parts2[i], "%d", &p2)
+			p2, _ = strconv.Atoi(parts2[i])
 		}
 
 		if p1 < p2 {

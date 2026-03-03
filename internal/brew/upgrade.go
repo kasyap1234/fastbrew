@@ -3,6 +3,7 @@ package brew
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -56,14 +57,35 @@ func (c *Client) UpgradeNative(packages []string, precomputedOutdated []Outdated
 	}
 
 	if len(caskOutdated) > 0 {
-		fmt.Printf("\n🍷 Upgrading %d cask(s)...\n", len(caskOutdated))
-		installer := NewCaskInstaller(c)
-		installer.SetOperation(MutationOperationUpgrade)
+		fmt.Printf("\n🍷 Upgrading %d cask(s) in parallel...\n", len(caskOutdated))
+		var caskWg sync.WaitGroup
+		caskSem := make(chan struct{}, c.getMaxParallel())
+		var caskErrMu sync.Mutex
+		var caskErrors []string
+
 		for _, pkg := range caskOutdated {
 			fmt.Printf("  %s %s → %s\n", pkg.Name, pkg.CurrentVersion, pkg.NewVersion)
-			if err := installer.Install(pkg.Name, c.ProgressManager); err != nil {
-				return fmt.Errorf("cask upgrade failed for %s: %w", pkg.Name, err)
+			caskWg.Add(1)
+			go func(p OutdatedPackage) {
+				defer caskWg.Done()
+				caskSem <- struct{}{}
+				defer func() { <-caskSem }()
+				installer := NewCaskInstaller(c)
+				installer.SetOperation(MutationOperationUpgrade)
+				if err := installer.Install(p.Name, c.ProgressManager); err != nil {
+					caskErrMu.Lock()
+					caskErrors = append(caskErrors, fmt.Sprintf("%s: %v", p.Name, err))
+					caskErrMu.Unlock()
+				}
+			}(pkg)
+		}
+		caskWg.Wait()
+
+		if len(caskErrors) > 0 {
+			for _, e := range caskErrors {
+				fmt.Printf("  ⚠️  %s\n", e)
 			}
+			return fmt.Errorf("cask upgrade failed for: %s", strings.Join(caskErrors, "; "))
 		}
 	}
 

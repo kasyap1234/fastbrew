@@ -21,13 +21,18 @@ const (
 	minCompressSize = 1024
 )
 
+// FormulaVersions matches the Homebrew API's "versions" object structure.
+type FormulaVersions struct {
+	Stable string `json:"stable"`
+}
+
 type Formula struct {
-	Name         string        `json:"name"`
-	Desc         string        `json:"desc"`
-	Homepage     string        `json:"homepage"`
-	Version      string        `json:"version"`
-	Installed    []interface{} `json:"installed"`
-	Dependencies []string      `json:"dependencies"`
+	Name         string          `json:"name"`
+	Desc         string          `json:"desc"`
+	Homepage     string          `json:"homepage"`
+	Versions     FormulaVersions `json:"versions"`
+	Installed    []interface{}   `json:"installed"`
+	Dependencies []string        `json:"dependencies"`
 }
 
 type Cask struct {
@@ -107,25 +112,61 @@ func decompressFile(data []byte) ([]byte, error) {
 }
 
 func (c *Client) LoadIndex() (*Index, error) {
-	formulae, err := c.LoadFormulaIndex()
-	if err != nil {
-		return nil, err
+	c.indexOnce.Do(func() {
+		var formulae []Formula
+		var casks []Cask
+		var fErr, cErr error
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			formulae, fErr = c.loadFormulaIndexDirect()
+		}()
+		go func() {
+			defer wg.Done()
+			casks, cErr = c.loadCaskIndexDirect()
+		}()
+		wg.Wait()
+
+		if fErr != nil {
+			c.indexErr = fErr
+			return
+		}
+		if cErr != nil {
+			c.indexErr = cErr
+			return
+		}
+
+		c.index = &Index{
+			Formulae: formulae,
+			Casks:    casks,
+		}
+	})
+	if c.indexErr != nil {
+		return nil, c.indexErr
 	}
-	casks, err := c.LoadCaskIndex()
-	if err != nil {
-		return nil, err
-	}
-	return &Index{
-		Formulae: formulae,
-		Casks:    casks,
-	}, nil
+	return c.index, nil
 }
 
 func (c *Client) LoadFormulaIndex() ([]Formula, error) {
-	if c.index != nil && c.index.Formulae != nil {
-		return c.index.Formulae, nil
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return nil, err
 	}
+	return idx.Formulae, nil
+}
 
+func (c *Client) LoadCaskIndex() ([]Cask, error) {
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return nil, err
+	}
+	return idx.Casks, nil
+}
+
+// loadFormulaIndexDirect reads and parses the formula index from disk (no caching).
+func (c *Client) loadFormulaIndexDirect() ([]Formula, error) {
 	cacheDir, err := c.GetCacheDir()
 	if err != nil {
 		return nil, err
@@ -141,19 +182,11 @@ func (c *Client) LoadFormulaIndex() ([]Formula, error) {
 		return nil, err
 	}
 
-	if c.index == nil {
-		c.index = &Index{}
-	}
-	c.index.Formulae = formulae
-
 	return formulae, nil
 }
 
-func (c *Client) LoadCaskIndex() ([]Cask, error) {
-	if c.index != nil && c.index.Casks != nil {
-		return c.index.Casks, nil
-	}
-
+// loadCaskIndexDirect reads and parses the cask index from disk (no caching).
+func (c *Client) loadCaskIndexDirect() ([]Cask, error) {
 	cacheDir, err := c.GetCacheDir()
 	if err != nil {
 		return nil, err
@@ -168,11 +201,6 @@ func (c *Client) LoadCaskIndex() ([]Cask, error) {
 	if err := loadJSON(cPath, &casks); err != nil {
 		return nil, err
 	}
-
-	if c.index == nil {
-		c.index = &Index{}
-	}
-	c.index.Casks = casks
 
 	return casks, nil
 }

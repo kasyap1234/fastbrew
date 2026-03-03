@@ -21,7 +21,7 @@ func BenchmarkResolveDeps(b *testing.B) {
 
 		formulae = append(formulae, Formula{
 			Name:         name,
-			Version:      "1.0.0",
+			Versions:     FormulaVersions{Stable: "1.0.0"},
 			Dependencies: deps,
 		})
 	}

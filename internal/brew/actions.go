@@ -260,7 +260,7 @@ func (c *Client) installFormulaeWithIndex(packages []string, idx *Index) error {
 	}
 
 	exCh := make(chan extractResult, len(downloaded))
-	extractSem := make(chan struct{}, 2) // limit extraction concurrency
+	extractSem := make(chan struct{}, c.getMaxParallel())
 
 	for _, dl := range downloaded {
 		wg.Add(1)
@@ -374,23 +374,32 @@ func (c *Client) linkParallel(installQueue []*RemoteFormula, operation string) e
 	}
 
 	if len(parallelQueue) > 0 {
-		fmt.Printf("  🔗 Linking %d packages...\n", len(parallelQueue))
+		fmt.Printf("  🔗 Linking %d packages in parallel...\n", len(parallelQueue))
 
+		var linkWg sync.WaitGroup
+		linkSem := make(chan struct{}, c.getMaxParallel())
 		for _, f := range parallelQueue {
-			c.emitMutation(operation, f.Name, MutationPhaseLink, MutationStatusRunning, "linking package", 0, 0, "")
-			result, err := c.Link(f.Name, f.Versions.Stable)
-			if err != nil {
-				fmt.Printf("  ❌ Failed to link %s: %v\n", f.Name, err)
-				c.emitMutation(operation, f.Name, MutationPhaseLink, MutationStatusFailed, err.Error(), 0, 0, "")
-				continue
-			}
-			if result.Success {
-				fmt.Printf("  ✅ Linked %s\n", f.Name)
-				c.emitMutation(operation, f.Name, MutationPhaseLink, MutationStatusSucceeded, "linked successfully", 0, 0, "")
-			} else {
-				c.emitMutation(operation, f.Name, MutationPhaseLink, MutationStatusFailed, "link completed with errors", 0, 0, "")
-			}
+			linkWg.Add(1)
+			go func(frm *RemoteFormula) {
+				defer linkWg.Done()
+				linkSem <- struct{}{}
+				defer func() { <-linkSem }()
+				c.emitMutation(operation, frm.Name, MutationPhaseLink, MutationStatusRunning, "linking package", 0, 0, "")
+				result, err := c.Link(frm.Name, frm.Versions.Stable)
+				if err != nil {
+					fmt.Printf("  ❌ Failed to link %s: %v\n", frm.Name, err)
+					c.emitMutation(operation, frm.Name, MutationPhaseLink, MutationStatusFailed, err.Error(), 0, 0, "")
+					return
+				}
+				if result.Success {
+					fmt.Printf("  ✅ Linked %s\n", frm.Name)
+					c.emitMutation(operation, frm.Name, MutationPhaseLink, MutationStatusSucceeded, "linked successfully", 0, 0, "")
+				} else {
+					c.emitMutation(operation, frm.Name, MutationPhaseLink, MutationStatusFailed, "link completed with errors", 0, 0, "")
+				}
+			}(f)
 		}
+		linkWg.Wait()
 	}
 
 	if len(sequentialQueue) > 0 {

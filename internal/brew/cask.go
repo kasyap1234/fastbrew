@@ -349,14 +349,50 @@ func (ci *CaskInstaller) installArtifacts(artifactPath string, artifacts []CaskA
 	return nil
 }
 
+func detectCaskArtifactExtension(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext == ".dmg" || ext == ".zip" || ext == ".pkg" {
+		return ext
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return ext
+	}
+	defer f.Close()
+
+	header := make([]byte, 512)
+	n, _ := f.Read(header)
+	if n > 4 && string(header[:4]) == "PK\x03\x04" {
+		return ".zip"
+	}
+
+	// Simple check for DMG magic bytes or just rely on content type
+	contentType := http.DetectContentType(header[:n])
+	if strings.Contains(contentType, "application/zip") {
+		return ".zip"
+	}
+	if strings.Contains(contentType, "application/x-mach-binary") || strings.Contains(contentType, "application/octet-stream") {
+		// DMG files are often octet-stream, but we can try hdiutil later if needed.
+		// For now, if it's not a zip and has no extension, fallback to .dmg as a guess or return empty.
+	}
+
+	return ext
+}
+
 func (ci *CaskInstaller) installApp(artifactPath string, apps []interface{}) error {
-	ext := strings.ToLower(filepath.Ext(artifactPath))
+	ext := detectCaskArtifactExtension(artifactPath)
 	switch ext {
 	case ".dmg":
 		return ci.mountAndInstallApp(artifactPath, apps)
 	case ".zip":
 		return ci.extractAndInstallApp(artifactPath, apps)
 	default:
+		// Fallback to trying dmg if we really don't know, since many casks are DMGs without extensions
+		if ext == "" {
+			fmt.Printf("⚠️ Unknown artifact format, trying to mount as DMG: %s\n", artifactPath)
+			return ci.mountAndInstallApp(artifactPath, apps)
+		}
 		return fmt.Errorf("unsupported app artifact format: %s", ext)
 	}
 }
@@ -401,6 +437,7 @@ func findMountPointInPlist(data []byte) (string, error) {
 	content := string(data)
 	lines := strings.Split(content, "\n")
 	var inEntities bool
+	var foundMountPointKey bool
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -408,20 +445,40 @@ func findMountPointInPlist(data []byte) (string, error) {
 			inEntities = true
 			continue
 		}
-		if inEntities && strings.Contains(trimmed, "mount-point") {
-			start := strings.Index(trimmed, "<string>")
-			if start == -1 {
-				continue
-			}
-			start += 8
-			end := strings.Index(trimmed[start:], "</string>")
-			if end == -1 {
-				continue
-			}
-			return trimmed[start : start+end], nil
+		if !inEntities {
+			continue
 		}
-		if inEntities && strings.HasPrefix(trimmed, "</array>") {
+		if strings.HasPrefix(trimmed, "</array>") {
 			break
+		}
+
+		// In plist format, <key> and <string> are on separate lines:
+		//   <key>mount-point</key>
+		//   <string>/Volumes/Something</string>
+		if foundMountPointKey {
+			start := strings.Index(trimmed, "<string>")
+			if start != -1 {
+				start += 8
+				end := strings.Index(trimmed[start:], "</string>")
+				if end != -1 {
+					return trimmed[start : start+end], nil
+				}
+			}
+			foundMountPointKey = false
+		}
+
+		if strings.Contains(trimmed, "<key>mount-point</key>") {
+			// Check if the value is on the same line (unlikely but defensive)
+			start := strings.Index(trimmed, "<string>")
+			if start != -1 {
+				start += 8
+				end := strings.Index(trimmed[start:], "</string>")
+				if end != -1 {
+					return trimmed[start : start+end], nil
+				}
+			}
+			// Value is on the next line
+			foundMountPointKey = true
 		}
 	}
 

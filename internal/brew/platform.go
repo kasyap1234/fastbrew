@@ -5,10 +5,25 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 )
 
-// GetPlatform returns the Homebrew-style platform string (e.g., "x86_64_linux", "arm64_sonoma")
+var (
+	cachedPlatform     string
+	cachedPlatformErr  error
+	cachedPlatformOnce sync.Once
+)
+
+// GetPlatform returns the Homebrew-style platform string (e.g., "x86_64_linux", "arm64_sonoma").
+// The result is cached after first call to avoid repeated subprocess spawning.
 func GetPlatform() (string, error) {
+	cachedPlatformOnce.Do(func() {
+		cachedPlatform, cachedPlatformErr = resolvePlatform()
+	})
+	return cachedPlatform, cachedPlatformErr
+}
+
+func resolvePlatform() (string, error) {
 	osName := runtime.GOOS
 	arch := runtime.GOARCH
 
