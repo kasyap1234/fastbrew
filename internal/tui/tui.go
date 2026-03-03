@@ -138,7 +138,7 @@ type packageProgress struct {
 	UpdatedAt time.Time
 }
 
-func InitialModel() model {
+func InitialModel() *model {
 	client, _ := brew.NewClient()
 
 	s := spinner.New()
@@ -153,7 +153,7 @@ func InitialModel() model {
 	l.Styles.Title = titleStyle
 	l.SetShowStatusBar(false)
 
-	return model{
+	return &model{
 		client:      client,
 		list:        l,
 		installed:   make(map[string]bool),
@@ -163,7 +163,7 @@ func InitialModel() model {
 	}
 }
 
-func (m model) Init() tea.Cmd {
+func (m *model) Init() tea.Cmd {
 	return tea.Batch(
 		m.spinner.Tick,
 		func() tea.Msg {
@@ -187,7 +187,7 @@ func (m model) Init() tea.Cmd {
 	)
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case spinner.TickMsg:
 		if !m.loaded {
@@ -335,7 +335,7 @@ func (m *model) startJob(target string, operation string) tea.Cmd {
 	)
 }
 
-func (m model) updateListItems() tea.Cmd {
+func (m *model) updateListItems() tea.Cmd {
 	var items []list.Item
 	for _, f := range m.index.Formulae {
 		items = append(items, item{
@@ -362,7 +362,7 @@ func (m model) updateListItems() tea.Cmd {
 	return cmd
 }
 
-func (m model) View() string {
+func (m *model) View() string {
 	if m.err != nil {
 		return fmt.Sprintf("Error: %v", m.err)
 	}
@@ -461,7 +461,7 @@ func (m *model) appendJobLog(line string) {
 	}
 }
 
-func (m model) renderJobPanel() string {
+func (m *model) renderJobPanel() string {
 	rows := m.sortedJobPackages()
 
 	var lines []string

@@ -57,7 +57,7 @@ func TestJobFinishedReenablesActionsAndUpdatesInstalled(t *testing.T) {
 	updatedModel, _ := m.Update(jobFinishedMsg{
 		Installed: map[string]bool{"jq": true},
 	})
-	updated := updatedModel.(model)
+	updated := updatedModel.(*model)
 
 	if updated.jobActive {
 		t.Fatal("expected jobActive=false after finish")
