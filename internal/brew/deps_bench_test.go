@@ -32,6 +32,9 @@ func BenchmarkResolveDeps(b *testing.B) {
 			Casks:    []Cask{},
 		},
 	}
+	// Mark indexOnce as done so LoadIndex doesn't overwrite the injected
+	// synthetic index by loading from disk.
+	client.indexOnce.Do(func() {})
 
 	target := []string{"pkg-399", "pkg-355", "pkg-275"}
 

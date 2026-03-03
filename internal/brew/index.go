@@ -113,6 +113,10 @@ func decompressFile(data []byte) ([]byte, error) {
 
 func (c *Client) LoadIndex() (*Index, error) {
 	c.indexOnce.Do(func() {
+		// Re-check inside Do in case another goroutine already loaded it.
+		if c.index != nil {
+			return
+		}
 		var formulae []Formula
 		var casks []Cask
 		var fErr, cErr error
@@ -150,6 +154,15 @@ func (c *Client) LoadIndex() (*Index, error) {
 }
 
 func (c *Client) LoadFormulaIndex() ([]Formula, error) {
+	// If a partial in-memory index exists with no formulae, load them from disk.
+	if c.index != nil && len(c.index.Formulae) == 0 {
+		formulae, err := c.loadFormulaIndexDirect()
+		if err != nil {
+			return nil, err
+		}
+		c.index.Formulae = formulae
+		return formulae, nil
+	}
 	idx, err := c.LoadIndex()
 	if err != nil {
 		return nil, err
@@ -158,6 +171,15 @@ func (c *Client) LoadFormulaIndex() ([]Formula, error) {
 }
 
 func (c *Client) LoadCaskIndex() ([]Cask, error) {
+	// If a partial in-memory index exists with no casks, load them from disk.
+	if c.index != nil && len(c.index.Casks) == 0 {
+		casks, err := c.loadCaskIndexDirect()
+		if err != nil {
+			return nil, err
+		}
+		c.index.Casks = casks
+		return casks, nil
+	}
 	idx, err := c.LoadIndex()
 	if err != nil {
 		return nil, err
