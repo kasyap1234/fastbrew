@@ -7,24 +7,38 @@ import (
 	"fastbrew/internal/daemon"
 	"fastbrew/internal/progress"
 	"fmt"
+	"io"
 	"math"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
+	tprogress "github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-var docStyle = lipgloss.NewStyle().Margin(1, 2)
-var jobPanelStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+var (
+	docStyle      = lipgloss.NewStyle().Margin(1, 2)
+	jobPanelStyle = lipgloss.NewStyle().Border(lipgloss.ThickBorder()).Padding(0, 1).BorderForeground(lipgloss.Color("62"))
+
+	titleStyle        = lipgloss.NewStyle().MarginLeft(2).Foreground(lipgloss.Color("205")).Bold(true)
+	itemStyle         = lipgloss.NewStyle().PaddingLeft(4)
+	selectedItemStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(lipgloss.Color("170"))
+	installedStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	spinnerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+	helpStyle         = list.DefaultStyles().HelpStyle.PaddingLeft(4).PaddingBottom(1)
+)
 
 const (
 	maxJobPanelPackages = 6
 	maxJobPanelLogs     = 3
-	jobPanelHeight      = 12
+	jobPanelHeight      = 14
 )
 
 type item struct {
@@ -35,17 +49,44 @@ type item struct {
 }
 
 func (i item) Title() string {
-	prefix := ""
-	if i.installed {
-		prefix = "✅ "
-	}
-	if i.isCask {
-		return prefix + "🍷 " + i.title
-	}
-	return prefix + i.title
+	return i.title
 }
 func (i item) Description() string { return i.desc }
 func (i item) FilterValue() string { return i.title }
+
+type itemDelegate struct{}
+
+func (d itemDelegate) Height() int                             { return 1 }
+func (d itemDelegate) Spacing() int                            { return 0 }
+func (d itemDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
+func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list.Item) {
+	i, ok := listItem.(item)
+	if !ok {
+		return
+	}
+
+	str := i.title
+	if i.isCask {
+		str = "🍷 " + str
+	} else {
+		str = "📦 " + str
+	}
+
+	if i.installed {
+		str = "✅ " + str
+	} else {
+		str = "   " + str
+	}
+
+	fn := itemStyle.Render
+	if index == m.Index() {
+		fn = func(s ...string) string {
+			return selectedItemStyle.Render("> " + strings.Join(s, " "))
+		}
+	}
+
+	fmt.Fprint(w, fn(str))
+}
 
 type model struct {
 	list      list.Model
@@ -55,8 +96,10 @@ type model struct {
 	width     int
 	height    int
 
-	loaded      bool
-	err         error
+	loaded  bool
+	err     error
+	spinner spinner.Model
+
 	jobActive   bool
 	jobVisible  bool
 	jobSource   string
@@ -66,6 +109,7 @@ type model struct {
 	jobEvents   chan tea.Msg
 	jobLogs     []string
 	jobPackages map[string]*packageProgress
+	progressBar tprogress.Model
 }
 
 type installedMsg map[string]bool
@@ -96,16 +140,32 @@ type packageProgress struct {
 
 func InitialModel() model {
 	client, _ := brew.NewClient()
+
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = spinnerStyle
+
+	p := tprogress.New(tprogress.WithDefaultGradient())
+
+	delegate := itemDelegate{}
+	l := list.New([]list.Item{}, delegate, 0, 0)
+	l.Title = "FastBrew Packages"
+	l.Styles.Title = titleStyle
+	l.SetShowStatusBar(false)
+
 	return model{
 		client:      client,
-		list:        list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0),
+		list:        l,
 		installed:   make(map[string]bool),
 		jobPackages: make(map[string]*packageProgress),
+		spinner:     s,
+		progressBar: p,
 	}
 }
 
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
+		m.spinner.Tick,
 		func() tea.Msg {
 			idx, err := m.client.LoadIndex()
 			if err != nil {
@@ -129,50 +189,52 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case spinner.TickMsg:
+		if !m.loaded {
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
+		}
+
+	case tprogress.FrameMsg:
+		progressModel, cmd := m.progressBar.Update(msg)
+		m.progressBar = progressModel.(tprogress.Model)
+		return m, cmd
+
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
-		if msg.String() == "enter" {
+
+		if msg.String() == "tab" {
+			if m.list.FilterState() != list.Filtering {
+				// We can toggle a view state here if we add a filter toggle or just let Bubbletea handle built in filtering (`/`). Fastbrew originally didn't have tab. Let's just leave it empty or add specific filtering logic later if needed.
+			}
+		}
+
+		if msg.String() == "enter" || msg.String() == "i" {
 			if m.jobActive {
 				return m, nil
 			}
 
 			if i, ok := m.list.SelectedItem().(item); ok {
-				events := make(chan tea.Msg, 1024)
-				m.jobActive = true
-				m.jobVisible = true
-				m.jobSource = "local"
-				m.jobTarget = i.title
-				m.jobStatus = daemon.JobStatusQueued
-				m.jobError = ""
-				m.jobEvents = events
-				m.jobLogs = nil
-				m.jobPackages = make(map[string]*packageProgress)
-				m.updateListSize()
+				return m, m.startJob(i.title, daemon.JobOperationInstall)
+			}
+		}
 
-				if daemonClient, daemonErr := daemonClientForTUI(); daemonErr == nil {
-					m.jobSource = "daemon"
-					return m, tea.Batch(
-						startJobWorker(events, func() {
-							runDaemonInstall(events, daemonClient, m.client, i.title)
-						}),
-						waitForJobMsg(events),
-					)
-				}
-
-				return m, tea.Batch(
-					startJobWorker(events, func() {
-						runLocalInstall(events, m.client, i.title)
-					}),
-					waitForJobMsg(events),
-				)
+		if msg.String() == "u" || msg.String() == "x" {
+			if m.jobActive {
+				return m, nil
+			}
+			if i, ok := m.list.SelectedItem().(item); ok && i.installed {
+				return m, m.startJob(i.title, daemon.JobOperationUninstall)
 			}
 		}
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.progressBar.Width = msg.Width - 10
 		m.updateListSize()
 
 	case error:
@@ -219,10 +281,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil {
 			m.jobStatus = daemon.JobStatusFailed
 			m.jobError = msg.Err.Error()
-			m.appendJobLog(fmt.Sprintf("install failed: %v", msg.Err))
+			m.appendJobLog(fmt.Sprintf("job failed: %v", msg.Err))
 		} else {
 			m.jobStatus = daemon.JobStatusSucceeded
-			m.appendJobLog("install completed")
+			m.appendJobLog("job completed")
 		}
 		if msg.Installed != nil {
 			m.installed = msg.Installed
@@ -242,6 +304,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
 	return m, cmd
+}
+
+func (m *model) startJob(target string, operation string) tea.Cmd {
+	events := make(chan tea.Msg, 1024)
+	m.jobActive = true
+	m.jobVisible = true
+	m.jobSource = "local"
+	m.jobTarget = target
+	m.jobStatus = daemon.JobStatusQueued
+	m.jobError = ""
+	m.jobEvents = events
+	m.jobLogs = nil
+	m.jobPackages = make(map[string]*packageProgress)
+	m.updateListSize()
+
+	runFunc := func() { runLocalInstall(events, m.client, target) }
+	if operation == daemon.JobOperationUninstall {
+		runFunc = func() { runLocalUninstall(events, m.client, target) }
+	}
+
+	if daemonClient, daemonErr := daemonClientForTUI(); daemonErr == nil {
+		m.jobSource = "daemon"
+		runFunc = func() { runDaemonJob(events, daemonClient, m.client, target, operation) }
+	}
+
+	return tea.Batch(
+		startJobWorker(events, runFunc),
+		waitForJobMsg(events),
+	)
 }
 
 func (m model) updateListItems() tea.Cmd {
@@ -276,7 +367,7 @@ func (m model) View() string {
 		return fmt.Sprintf("Error: %v", m.err)
 	}
 	if !m.loaded {
-		return "Loading FastBrew Index (this happens once per day)..."
+		return fmt.Sprintf("\n\n   %s Loading FastBrew Index...", m.spinner.View())
 	}
 
 	view := m.list.View()
@@ -374,36 +465,54 @@ func (m model) renderJobPanel() string {
 	rows := m.sortedJobPackages()
 
 	var lines []string
-	summary := fmt.Sprintf("Job %s (%s): %s", daemon.JobOperationInstall, m.jobSource, m.jobStatus)
-	if m.jobTarget != "" {
-		summary = fmt.Sprintf("%s [%s]", summary, m.jobTarget)
+	summary := fmt.Sprintf("Job %s (%s): %s", m.jobStatus, m.jobSource, m.jobTarget)
+
+	// Add styling to summary based on status
+	statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true) // Blue for progress
+	if m.jobStatus == daemon.JobStatusSucceeded {
+		statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true) // Green for success
+	} else if m.jobStatus == daemon.JobStatusFailed {
+		statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true) // Red for failed
 	}
-	lines = append(lines, summary)
+
+	lines = append(lines, statusStyle.Render(summary))
 
 	if m.jobError != "" {
-		lines = append(lines, fmt.Sprintf("Error: %s", m.jobError))
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(fmt.Sprintf("Error: %s", m.jobError)))
 	}
 
 	if len(rows) == 0 {
-		lines = append(lines, "No package progress yet...")
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Waiting for job details..."))
 	} else {
-		lines = append(lines, "Packages:")
 		for i, row := range rows {
 			if i >= maxJobPanelPackages {
 				break
 			}
-			lines = append(lines, formatPackageRow(row))
+
+			// Show progress bar instead of text for percentage
+			bar := m.progressBar.ViewAs(row.Percent / 100)
+			if row.Total <= 0 {
+				bar = m.progressBar.ViewAs(0)
+				if row.Status == daemon.JobEventStatusSucceeded {
+					bar = m.progressBar.ViewAs(1)
+				}
+			}
+
+			line := fmt.Sprintf("  %-15s %-10s %s", row.Name, row.Phase, bar)
+			lines = append(lines, line)
 		}
 	}
 
+	lines = append(lines, "")
+
 	if len(m.jobLogs) > 0 {
-		lines = append(lines, "Logs:")
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("Logs:"))
 		start := 0
 		if len(m.jobLogs) > maxJobPanelLogs {
 			start = len(m.jobLogs) - maxJobPanelLogs
 		}
 		for _, line := range m.jobLogs[start:] {
-			lines = append(lines, "  "+line)
+			lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Render("  "+line))
 		}
 	}
 
@@ -498,10 +607,10 @@ func sendBlocking(events chan<- tea.Msg, msg tea.Msg) {
 	events <- msg
 }
 
-func runDaemonInstall(events chan<- tea.Msg, daemonClient *daemon.Client, brewClient *brew.Client, pkg string) {
+func runDaemonJob(events chan<- tea.Msg, daemonClient *daemon.Client, brewClient *brew.Client, pkg string, operation string) {
 	defer close(events)
 
-	jobID, err := daemonClient.SubmitJob(daemon.JobOperationInstall, []string{pkg}, daemon.JobSubmitOptions{})
+	jobID, err := daemonClient.SubmitJob(operation, []string{pkg}, daemon.JobSubmitOptions{})
 	if err != nil {
 		sendBlocking(events, jobFinishedMsg{Err: err})
 		return
@@ -715,6 +824,44 @@ func runLocalInstall(events chan<- tea.Msg, client *brew.Client, pkg string) {
 	}
 
 	sendBestEffort(events, jobStatusMsg{Status: daemon.JobStatusSucceeded})
+	installed, loadErr := loadInstalledMap(client)
+	sendBlocking(events, jobFinishedMsg{
+		Err:       loadErr,
+		Installed: installed,
+	})
+}
+
+func runLocalUninstall(events chan<- tea.Msg, client *brew.Client, pkg string) {
+	defer close(events)
+
+	sendBestEffort(events, jobStatusMsg{Status: daemon.JobStatusRunning})
+
+	pkgPath := filepath.Join(client.Cellar, pkg)
+
+	if _, err := os.Stat(pkgPath); os.IsNotExist(err) {
+		sendBestEffort(events, jobStatusMsg{Status: daemon.JobStatusFailed, Error: fmt.Sprintf("%s is not installed", pkg)})
+		sendBlocking(events, jobFinishedMsg{Err: err})
+		return
+	}
+
+	sendBestEffort(events, jobEventMsg{Event: daemon.JobEvent{Kind: daemon.JobEventKindPackage, Operation: daemon.JobOperationUninstall, Package: pkg, Phase: brew.MutationPhaseUninstall, Status: daemon.JobEventStatusRunning}})
+
+	client.Unlink(pkg)
+
+	optLink := filepath.Join(client.Prefix, "opt", pkg)
+	if info, err := os.Lstat(optLink); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		os.Remove(optLink)
+	}
+
+	if err := os.RemoveAll(pkgPath); err != nil {
+		sendBestEffort(events, jobStatusMsg{Status: daemon.JobStatusFailed, Error: err.Error()})
+		sendBlocking(events, jobFinishedMsg{Err: err})
+		return
+	}
+
+	sendBestEffort(events, jobEventMsg{Event: daemon.JobEvent{Kind: daemon.JobEventKindPackage, Operation: daemon.JobOperationUninstall, Package: pkg, Phase: brew.MutationPhaseUninstall, Status: daemon.JobEventStatusSucceeded}})
+	sendBestEffort(events, jobStatusMsg{Status: daemon.JobStatusSucceeded})
+
 	installed, loadErr := loadInstalledMap(client)
 	sendBlocking(events, jobFinishedMsg{
 		Err:       loadErr,
