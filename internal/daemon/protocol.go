@@ -199,7 +199,8 @@ type ServicesListResponse struct {
 }
 
 type JobSubmitOptions struct {
-	Pinned []string `json:"pinned,omitempty"`
+	Pinned       []string `json:"pinned,omitempty"`
+	StrictNative bool     `json:"strict_native,omitempty"`
 }
 
 type JobSubmitRequest struct {

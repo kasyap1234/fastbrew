@@ -479,7 +479,7 @@ func (s *Server) submitJob(req JobSubmitRequest) (string, error) {
 	switch operation {
 	case JobOperationInstall, JobOperationUpgrade, JobOperationUninstall, JobOperationReinstall:
 	default:
-		return "", fmt.Errorf("unsupported job operation %q", req.Operation)
+		return "", fmt.Errorf("unsupported job operation %q", operation)
 	}
 
 	job := s.jobs.Submit(operation, req.Packages, func(job *Job) error {
@@ -491,7 +491,7 @@ func (s *Server) submitJob(req JobSubmitRequest) (string, error) {
 
 		switch operation {
 		case JobOperationInstall:
-			return s.executeInstallJob(job, req.Packages)
+			return s.executeInstallJob(job, req.Packages, req.Options.StrictNative)
 		case JobOperationUpgrade:
 			return s.executeUpgradeJob(job, req.Packages, req.Options.Pinned)
 		case JobOperationUninstall:
@@ -506,7 +506,7 @@ func (s *Server) submitJob(req JobSubmitRequest) (string, error) {
 	return job.id, nil
 }
 
-func (s *Server) executeInstallJob(job *Job, packages []string) error {
+func (s *Server) executeInstallJob(job *Job, packages []string, strictNative bool) error {
 	if len(packages) == 0 {
 		return fmt.Errorf("install requires at least one package")
 	}
@@ -514,7 +514,7 @@ func (s *Server) executeInstallJob(job *Job, packages []string) error {
 	for _, pkg := range packages {
 		job.addPackageEvent("info", pkg, JobEventPhaseInstall, JobEventStatusQueued, "package queued", nil, nil, "")
 	}
-	if err := s.client.InstallNative(packages); err != nil {
+	if err := s.client.InstallNativeWithOptions(packages, brew.InstallOptions{StrictNative: strictNative}); err != nil {
 		return err
 	}
 	job.addEvent("info", "Install completed")

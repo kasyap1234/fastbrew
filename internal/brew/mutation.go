@@ -16,6 +16,7 @@ const (
 	MutationPhaseInstall   = "install"
 	MutationPhaseUninstall = "uninstall"
 	MutationPhaseComplete  = "complete"
+	MutationPhaseFallback  = "fallback"
 )
 
 const (

@@ -10,6 +10,17 @@ import (
 	"sync"
 )
 
+type InstallOptions struct {
+	StrictNative bool
+}
+
+func (o InstallOptions) Defaults() InstallOptions {
+	if o == (InstallOptions{}) {
+		return InstallOptions{StrictNative: false}
+	}
+	return o
+}
+
 // Fetch downloads the package bottle/source
 func (c *Client) Fetch(pkg string) error {
 	idx, err := c.LoadIndex()
@@ -50,6 +61,11 @@ func (c *Client) Fetch(pkg string) error {
 // InstallNative performs native installation by resolving deps, downloading bottles, and linking.
 // Also handles cask installation via brew install --cask.
 func (c *Client) InstallNative(packages []string) error {
+	return c.InstallNativeWithOptions(packages, InstallOptions{})
+}
+
+func (c *Client) InstallNativeWithOptions(packages []string, opts InstallOptions) error {
+	opts = opts.Defaults()
 	idx, err := c.LoadIndex()
 	if err != nil {
 		return err
@@ -60,24 +76,21 @@ func (c *Client) InstallNative(packages []string) error {
 		caskSet[cask.Token] = struct{}{}
 	}
 
-	// Split packages into casks and formulae
-	var casks, formulae []string
+	coreFormulae := c.classifyFormulae(packages, idx)
+
+	var casks []string
 	for _, pkg := range packages {
 		if _, ok := caskSet[pkg]; ok {
 			casks = append(casks, pkg)
-		} else {
-			formulae = append(formulae, pkg)
 		}
 	}
 
-	// Install formulae using native bottle installation
-	if len(formulae) > 0 {
-		if err := c.installFormulaeWithIndex(formulae, idx); err != nil {
+	if len(coreFormulae) > 0 {
+		if err := c.installFormulaeWithIndex(coreFormulae, idx, opts); err != nil {
 			return err
 		}
 	}
 
-	// Install casks using native installer
 	if len(casks) > 0 {
 		fmt.Printf("🍷 Installing casks: %v\n", casks)
 		installer := NewCaskInstaller(c)
@@ -94,8 +107,31 @@ func (c *Client) InstallNative(packages []string) error {
 	return nil
 }
 
+type classifiedFormulae struct {
+	coreFormulae []string
+	tapRefs      []TapFormulaRef
+}
+
+func (c *Client) classifyFormulae(packages []string, idx *Index) []string {
+	formulaSet := make(map[string]struct{}, len(idx.Formulae))
+	for _, f := range idx.Formulae {
+		formulaSet[f.Name] = struct{}{}
+	}
+
+	var coreFormulae []string
+	for _, pkg := range packages {
+		if strings.Contains(pkg, "/") {
+			continue
+		}
+		if _, isFormula := formulaSet[pkg]; isFormula {
+			coreFormulae = append(coreFormulae, pkg)
+		}
+	}
+	return coreFormulae
+}
+
 // installFormulae handles formula installation via bottles
-func (c *Client) installFormulaeWithIndex(packages []string, idx *Index) error {
+func (c *Client) installFormulaeWithIndex(packages []string, idx *Index, opts InstallOptions) error {
 	fmt.Println("🔍 Resolving dependencies from API...")
 
 	formulaMap := make(map[string]Formula)
@@ -341,7 +377,7 @@ func (c *Client) installFormulae(packages []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load index: %w", err)
 	}
-	return c.installFormulaeWithIndex(packages, idx)
+	return c.installFormulaeWithIndex(packages, idx, InstallOptions{})
 }
 
 func (c *Client) linkParallel(installQueue []*RemoteFormula, operation string) error {

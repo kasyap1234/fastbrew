@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fastbrew/internal/brew"
 	"fastbrew/internal/config"
 	"fastbrew/internal/daemon"
 	"fastbrew/internal/progress"
@@ -13,6 +14,7 @@ import (
 
 var showProgress bool
 var installVerbose bool
+var strictNative bool
 
 var installCmd = &cobra.Command{
 	Use:   "install [package...]",
@@ -20,7 +22,10 @@ var installCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Printf("🚀 FastBrew installing: %v\n", args)
-		if ran, err := tryRunMutationJob("install", daemon.JobOperationInstall, args, daemon.JobSubmitOptions{}); ran {
+		jobOpts := daemon.JobSubmitOptions{
+			StrictNative: strictNative,
+		}
+		if ran, err := tryRunMutationJob("install", daemon.JobOperationInstall, args, jobOpts); ran {
 			if err != nil {
 				fmt.Printf("Error installing packages: %v\n", err)
 				os.Exit(1)
@@ -45,7 +50,7 @@ var installCmd = &cobra.Command{
 			go displayProgress(client.ProgressManager)
 		}
 
-		if err := client.InstallNative(args); err != nil {
+		if err := client.InstallNativeWithOptions(args, brew.InstallOptions{StrictNative: strictNative}); err != nil {
 			fmt.Printf("Error installing packages: %v\n", err)
 			os.Exit(1)
 		}
@@ -79,5 +84,6 @@ func displayProgress(pm *progress.Manager) {
 func init() {
 	installCmd.Flags().BoolVarP(&showProgress, "progress", "p", false, "Show download progress")
 	installCmd.Flags().BoolVar(&installVerbose, "verbose", false, "Show detailed output (extraction timing, etc.)")
+	installCmd.Flags().BoolVar(&strictNative, "strict-native", false, "Disable brew fallback for unsupported tap formulas")
 	rootCmd.AddCommand(installCmd)
 }
