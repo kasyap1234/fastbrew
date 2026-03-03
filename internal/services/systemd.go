@@ -275,6 +275,38 @@ func (m *SystemdManager) Restart(serviceName string) error {
 	return nil
 }
 
+func (m *SystemdManager) Enable(serviceName string) error {
+	servicePath := m.findServiceFilePath(serviceName)
+	if servicePath == "" {
+		return ServiceNotFoundError{Name: serviceName}
+	}
+
+	_, err := m.runner.Run("systemctl", "--user", "enable", serviceName)
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return SystemctlError{Command: "enable", Scope: "--user", Cause: err, Output: string(exitErr.Stderr)}
+		}
+		return SystemctlError{Command: "enable", Scope: "--user", Cause: err}
+	}
+	return nil
+}
+
+func (m *SystemdManager) Disable(serviceName string) error {
+	servicePath := m.findServiceFilePath(serviceName)
+	if servicePath == "" {
+		return ServiceNotFoundError{Name: serviceName}
+	}
+
+	_, err := m.runner.Run("systemctl", "--user", "disable", serviceName)
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return SystemctlError{Command: "disable", Scope: "--user", Cause: err, Output: string(exitErr.Stderr)}
+		}
+		return SystemctlError{Command: "disable", Scope: "--user", Cause: err}
+	}
+	return nil
+}
+
 // UserServicePathError indicates an error with the user service directory
 type UserServicePathError struct {
 	Path  string
