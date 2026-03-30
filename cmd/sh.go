@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fastbrew/internal/brew"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,32 +25,13 @@ var shCmd = &cobra.Command{
 			shell = "bash"
 		}
 
-		prefix := os.Getenv("HOMEBREW_PREFIX")
-		if prefix == "" {
-			if _, err := os.Stat("/opt/homebrew"); err == nil {
-				prefix = "/opt/homebrew"
-			} else if _, err := os.Stat("/usr/local"); err == nil {
-				prefix = "/usr/local"
-			} else if _, err := os.Stat("/home/linuxbrew/.linuxbrew"); err == nil {
-				prefix = "/home/linuxbrew/.linuxbrew"
-			}
-		}
-
-		if prefix == "" {
-			fmt.Fprintln(os.Stderr, "Error: Could not determine Homebrew prefix. Set HOMEBREW_PREFIX environment variable")
+		env, err := brew.GetEnvironment()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: Could not determine Homebrew environment: %v\n", err)
 			os.Exit(1)
 		}
 
-		binPath := filepath.Join(prefix, "bin")
-		manPath := filepath.Join(prefix, "share/man")
-
-		if shell == "fish" {
-			fmt.Printf("set -gx PATH %s $PATH\n", binPath)
-			fmt.Printf("set -gx MANPATH %s $MANPATH\n", manPath)
-		} else {
-			fmt.Printf("export PATH=\"%s:$PATH\"\n", binPath)
-			fmt.Printf("export MANPATH=\"%s:$MANPATH\"\n", manPath)
-		}
+		fmt.Print(env.ShellEnv(shell))
 	},
 }
 

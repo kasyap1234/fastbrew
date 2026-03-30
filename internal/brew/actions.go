@@ -76,7 +76,7 @@ func (c *Client) InstallNativeWithOptions(packages []string, opts InstallOptions
 		caskSet[cask.Token] = struct{}{}
 	}
 
-	coreFormulae := c.classifyFormulae(packages, idx)
+	coreFormulae, tapFormulae := c.classifyFormulae(packages, idx)
 
 	var casks []string
 	for _, pkg := range packages {
@@ -89,6 +89,22 @@ func (c *Client) InstallNativeWithOptions(packages []string, opts InstallOptions
 		if err := c.installFormulaeWithIndex(coreFormulae, idx, opts); err != nil {
 			return err
 		}
+	}
+
+	// Install tap formulae
+	if len(tapFormulae) > 0 {
+		fmt.Printf("🚰 Installing tap formulae: %v\n", tapFormulae)
+		tapManager, err := NewTapManager()
+		if err != nil {
+			return fmt.Errorf("failed to initialize tap manager: %w", err)
+		}
+		tapInstaller := NewTapFormulaInstaller(c, tapManager)
+		for _, tapRef := range tapFormulae {
+			if err := tapInstaller.InstallTapFormula(tapRef, opts); err != nil {
+				return fmt.Errorf("tap formula installation failed for %s: %w", tapRef, err)
+			}
+		}
+		fmt.Println("✅ Tap formulae installed successfully")
 	}
 
 	if len(casks) > 0 {
@@ -112,22 +128,23 @@ type classifiedFormulae struct {
 	tapRefs      []TapFormulaRef
 }
 
-func (c *Client) classifyFormulae(packages []string, idx *Index) []string {
+func (c *Client) classifyFormulae(packages []string, idx *Index) ([]string, []string) {
 	formulaSet := make(map[string]struct{}, len(idx.Formulae))
 	for _, f := range idx.Formulae {
 		formulaSet[f.Name] = struct{}{}
 	}
 
 	var coreFormulae []string
+	var tapFormulae []string
 	for _, pkg := range packages {
 		if strings.Contains(pkg, "/") {
-			continue
-		}
-		if _, isFormula := formulaSet[pkg]; isFormula {
+			// This is a tap formula reference like user/repo/formula
+			tapFormulae = append(tapFormulae, pkg)
+		} else if _, isFormula := formulaSet[pkg]; isFormula {
 			coreFormulae = append(coreFormulae, pkg)
 		}
 	}
-	return coreFormulae
+	return coreFormulae, tapFormulae
 }
 
 // installFormulae handles formula installation via bottles

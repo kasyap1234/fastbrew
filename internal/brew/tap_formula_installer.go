@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"fastbrew/internal/progress"
 )
@@ -24,28 +23,19 @@ func NewTapFormulaInstaller(c *Client, tm *TapManager) *TapFormulaInstaller {
 func (i *TapFormulaInstaller) InstallTapFormula(ref string, opts InstallOptions) error {
 	resolved, err := i.resolver.Resolve(ref)
 	if err != nil {
-		if opts.StrictNative {
-			return err
-		}
-		return i.fallbackToBrew(ref, err)
+		return fmt.Errorf("could not resolve tap formula %s: %w", ref, err)
 	}
 
 	meta, err := ParseTapFormula(resolved.FormulaPath)
 	if err != nil {
-		if opts.StrictNative {
-			return err
-		}
-		return i.fallbackToBrew(ref, err)
+		return fmt.Errorf("could not parse formula %s: %w", ref, err)
 	}
 
 	if len(meta.UnsupportedStanzas) > 0 {
-		if opts.StrictNative {
-			return &UnsupportedError{
-				Formula: ref,
-				Stanzas: meta.UnsupportedStanzas,
-			}
+		return &UnsupportedError{
+			Formula: ref,
+			Stanzas: meta.UnsupportedStanzas,
 		}
-		return i.fallbackToBrewWithUnsupported(ref, meta)
 	}
 
 	if err := i.installDependencies(meta, opts); err != nil {
@@ -62,10 +52,7 @@ func (i *TapFormulaInstaller) InstallTapFormula(ref string, opts InstallOptions)
 	}
 
 	if err := i.downloadAndInstall(meta, resolved); err != nil {
-		if opts.StrictNative {
-			return err
-		}
-		return i.fallbackToBrew(ref, err)
+		return fmt.Errorf("failed to download and install %s: %w", ref, err)
 	}
 
 	return i.linkFormula(resolved.Name, meta.Version)
@@ -204,20 +191,4 @@ func (i *TapFormulaInstaller) linkFormula(name, version string) error {
 		fmt.Printf("  ⚠️  Link completed with errors for %s\n", name)
 	}
 	return nil
-}
-
-func (i *TapFormulaInstaller) fallbackToBrew(ref string, cause error) error {
-	fmt.Printf("  ⚠️  Falling back to brew for %s: %v\n", ref, cause)
-	ref = strings.TrimPrefix(ref, "homebrew/")
-	return i.client.InstallBrewFallback(ref)
-}
-
-func (i *TapFormulaInstaller) fallbackToBrewWithUnsupported(ref string, meta *TapFormulaMetadata) error {
-	fmt.Printf("  ⚠️  Falling back to brew for %s (unsupported stanzas: %v)\n", ref, meta.UnsupportedStanzas)
-	ref = strings.TrimPrefix(ref, "homebrew/")
-	return i.client.InstallBrewFallback(ref)
-}
-
-func (c *Client) InstallBrewFallback(ref string) error {
-	return fmt.Errorf("brew fallback not implemented: %s", ref)
 }

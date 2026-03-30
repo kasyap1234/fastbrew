@@ -51,6 +51,11 @@ func TestClient_ListInstalledNative(t *testing.T) {
 	}
 
 	client := &Client{
+		Environment: &Environment{
+			Prefix:   prefix,
+			Cellar:   cellar,
+			Caskroom: caskroom,
+		},
 		Prefix: prefix,
 		Cellar: cellar,
 	}

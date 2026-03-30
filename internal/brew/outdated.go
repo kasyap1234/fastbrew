@@ -376,9 +376,7 @@ var versionLineRegex = regexp.MustCompile(`^\s*version\s+"([^"]+)"`)
 // GetTapFormulaVersion scans all installed taps for a formula .rb file
 // and extracts the version from it.
 func (c *Client) GetTapFormulaVersion(name string) (string, bool) {
-	detectHomebrewPaths()
-
-	entries, err := os.ReadDir(homebrewTapsDir)
+	entries, err := os.ReadDir(c.Environment.TapsDir)
 	if err != nil {
 		return "", false
 	}
@@ -387,7 +385,7 @@ func (c *Client) GetTapFormulaVersion(name string) (string, bool) {
 		if !userEntry.IsDir() {
 			continue
 		}
-		userDir := filepath.Join(homebrewTapsDir, userEntry.Name())
+		userDir := filepath.Join(c.Environment.TapsDir, userEntry.Name())
 		repoEntries, err := os.ReadDir(userDir)
 		if err != nil {
 			continue

@@ -61,5 +61,22 @@ var uninstallCmd = &cobra.Command{
 }
 
 func init() {
+	// Add rm and remove aliases for brew compatibility
+	rmCmd := &cobra.Command{
+		Use:   "rm [package...]",
+		Short: "Alias for uninstall",
+		Args:  cobra.MinimumNArgs(1),
+		Run:   uninstallCmd.Run,
+	}
+
+	removeCmd := &cobra.Command{
+		Use:   "remove [package...]",
+		Short: "Alias for uninstall",
+		Args:  cobra.MinimumNArgs(1),
+		Run:   uninstallCmd.Run,
+	}
+
 	rootCmd.AddCommand(uninstallCmd)
+	rootCmd.AddCommand(rmCmd)
+	rootCmd.AddCommand(removeCmd)
 }

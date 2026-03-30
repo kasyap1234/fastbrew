@@ -71,7 +71,13 @@ func TestIsValidTapRepo(t *testing.T) {
 }
 
 func TestTapLocalPath(t *testing.T) {
-	detectHomebrewPaths()
+	// Create a TapManager with environment
+	tm := &TapManager{
+		taps: make(map[string]Tap),
+		env: &Environment{
+			TapsDir: "/opt/homebrew/Homebrew/Library/Taps",
+		},
+	}
 
 	tests := []struct {
 		repo      string
@@ -84,7 +90,7 @@ func TestTapLocalPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.repo, func(t *testing.T) {
-			path := tapLocalPath(tt.repo)
+			path := tm.tapLocalPath(tt.repo)
 			if path == "" {
 				t.Errorf("tapLocalPath(%q) = empty string", tt.repo)
 			}
@@ -187,13 +193,10 @@ func TestTapManagerGetTap(t *testing.T) {
 }
 
 func TestTapManagerListTapsEmptyDir(t *testing.T) {
-	detectHomebrewPaths()
-
 	origHome := os.Getenv("HOME")
 	origPrefix := os.Getenv("HOMEBREW_PREFIX")
 	homeDir := t.TempDir()
 	os.Setenv("HOME", homeDir)
-
 	os.Setenv("HOMEBREW_PREFIX", homeDir)
 
 	defer func() {
@@ -205,11 +208,12 @@ func TestTapManagerListTapsEmptyDir(t *testing.T) {
 		}
 	}()
 
-	detectHomebrewPaths()
-
 	tm := &TapManager{
-		registryPath: filepath.Join(homeDir, ".fastbrew", "taps.json"),
+		registryPath: filepath.Join(homeDir, ".fastbrew", "cache", "taps.json"),
 		taps:         make(map[string]Tap),
+		env: &Environment{
+			TapsDir: filepath.Join(homeDir, "Homebrew", "Library", "Taps"),
+		},
 	}
 
 	taps, err := tm.ListTaps()

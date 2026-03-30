@@ -2,7 +2,6 @@ package brew
 
 import (
 	"fastbrew/internal/progress"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +9,7 @@ import (
 )
 
 type Client struct {
+	Environment     *Environment
 	Prefix          string
 	Cellar          string
 	Verbose         bool
@@ -41,22 +41,16 @@ func (c *Client) getMaxParallel() int {
 }
 
 func NewClient() (*Client, error) {
-	if p := os.Getenv("HOMEBREW_PREFIX"); p != "" {
-		return &Client{Prefix: p, Cellar: filepath.Join(p, "Cellar")}, nil
+	env, err := GetEnvironment()
+	if err != nil {
+		return nil, err
 	}
 
-	if _, err := os.Stat("/home/linuxbrew/.linuxbrew"); err == nil {
-		return &Client{Prefix: "/home/linuxbrew/.linuxbrew", Cellar: "/home/linuxbrew/.linuxbrew/Cellar"}, nil
-	}
-
-	if _, err := os.Stat("/opt/homebrew"); err == nil {
-		return &Client{Prefix: "/opt/homebrew", Cellar: "/opt/homebrew/Cellar"}, nil
-	}
-	if _, err := os.Stat("/usr/local/Cellar"); err == nil {
-		return &Client{Prefix: "/usr/local", Cellar: "/usr/local/Cellar"}, nil
-	}
-
-	return nil, fmt.Errorf("could not find brew prefix: no known prefix found. Set HOMEBREW_PREFIX environment variable")
+	return &Client{
+		Environment: env,
+		Prefix:      env.Prefix,
+		Cellar:      env.Cellar,
+	}, nil
 }
 
 // PackageInfo represents minimal info needed for listing/searching
@@ -74,8 +68,8 @@ func (c *Client) ListInstalledNative() ([]PackageInfo, error) {
 	var packages []PackageInfo
 
 	// 1. Get formulae from Cellar
-	if _, err := os.Stat(c.Cellar); err == nil {
-		entries, err := os.ReadDir(c.Cellar)
+	if _, err := os.Stat(c.Environment.Cellar); err == nil {
+		entries, err := os.ReadDir(c.Environment.Cellar)
 		if err != nil {
 			return nil, err
 		}
@@ -87,7 +81,7 @@ func (c *Client) ListInstalledNative() ([]PackageInfo, error) {
 			name := entry.Name()
 
 			// Get version from subdirectory
-			versionsDir := filepath.Join(c.Cellar, name)
+			versionsDir := filepath.Join(c.Environment.Cellar, name)
 			vEntries, err := os.ReadDir(versionsDir)
 			if err != nil {
 				continue
@@ -115,16 +109,15 @@ func (c *Client) ListInstalledNative() ([]PackageInfo, error) {
 	}
 
 	// 2. Get casks from Caskroom directory
-	caskroom := filepath.Join(c.Prefix, "Caskroom")
-	if _, err := os.Stat(caskroom); err == nil {
-		entries, err := os.ReadDir(caskroom)
+	if _, err := os.Stat(c.Environment.Caskroom); err == nil {
+		entries, err := os.ReadDir(c.Environment.Caskroom)
 		if err == nil {
 			for _, entry := range entries {
 				if !entry.IsDir() {
 					continue
 				}
 				name := entry.Name()
-				versionsDir := filepath.Join(caskroom, name)
+				versionsDir := filepath.Join(c.Environment.Caskroom, name)
 				vEntries, err := os.ReadDir(versionsDir)
 				if err != nil || len(vEntries) == 0 {
 					continue

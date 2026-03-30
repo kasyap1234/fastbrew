@@ -229,7 +229,13 @@ var bundleCheckCmd = &cobra.Command{
 			tapRepo := fmt.Sprintf("%s/%s", tap.User, tap.Repo)
 			_, exists := tapManager.GetTap(tapRepo)
 			if !exists {
-				localPath := filepath.Join("/opt/homebrew/Library/Taps", tap.User, "homebrew-"+tap.Repo)
+				// Get environment to check tap location
+				env, err := brew.GetEnvironment()
+				if err != nil {
+					missing = append(missing, "tap: "+tapRepo)
+					continue
+				}
+				localPath := filepath.Join(env.TapsDir, tap.User, "homebrew-"+tap.Repo)
 				if _, err := os.Stat(localPath); os.IsNotExist(err) {
 					missing = append(missing, "tap: "+tapRepo)
 				}

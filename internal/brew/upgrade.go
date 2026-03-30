@@ -2,7 +2,6 @@ package brew
 
 import (
 	"fmt"
-	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -54,40 +53,41 @@ func (c *Client) UpgradeNative(packages []string, precomputedOutdated []Outdated
 	}
 
 	if len(tapOutdated) > 0 {
-		fmt.Printf("\n🚰 Upgrading %d tap formula(e)...\n", len(tapOutdated))
+		fmt.Printf("\nUpgrading %d tap formula(e)...\n", len(tapOutdated))
 		var tapWg sync.WaitGroup
 		tapSem := make(chan struct{}, c.getMaxParallel())
 		var tapErrMu sync.Mutex
 		var tapErrors []string
 
-		for _, pkg := range tapOutdated {
-			fmt.Printf("  %s %s → %s\n", pkg.Name, pkg.CurrentVersion, pkg.NewVersion)
-			tapWg.Add(1)
-			go func(p OutdatedPackage) {
-				defer tapWg.Done()
-				tapSem <- struct{}{}
-				defer func() { <-tapSem }()
+		// Create tap manager and installer
+		tapManager, tmErr := NewTapManager()
+		if tmErr == nil {
+			installer := NewTapFormulaInstaller(c, tapManager)
 
-				// Re-use CaskInstaller which already shells out to brew,
-				// but change the operation since it's a formula, not a cask.
-				// Wait, CaskInstaller hardcodes `--cask`. We need a direct brew execution.
-				cmd := exec.Command("brew", "upgrade", p.Name)
-				cmd.Stdout = nil // suppress verbose output unless error
-				cmd.Stderr = nil
-				if err := cmd.Run(); err != nil {
-					tapErrMu.Lock()
-					tapErrors = append(tapErrors, fmt.Sprintf("%s: %v", p.Name, err))
-					tapErrMu.Unlock()
-				} else {
-					fmt.Printf("  ✅ Upgraded %s\n", p.Name)
-				}
-			}(pkg)
+			for _, pkg := range tapOutdated {
+				fmt.Printf("  %s %s → %s\n", pkg.Name, pkg.CurrentVersion, pkg.NewVersion)
+				tapWg.Add(1)
+				go func(p OutdatedPackage) {
+					defer tapWg.Done()
+					tapSem <- struct{}{}
+					defer func() { <-tapSem }()
+
+					opts := InstallOptions{StrictNative: true}
+					if err := installer.InstallTapFormula(p.Name, opts); err != nil {
+						tapErrMu.Lock()
+						tapErrors = append(tapErrors, fmt.Sprintf("%s: %v", p.Name, err))
+						tapErrMu.Unlock()
+					} else {
+						fmt.Printf("  Upgraded %s\n", p.Name)
+					}
+				}(pkg)
+			}
 		}
 		tapWg.Wait()
 
 		if len(tapErrors) > 0 {
 			for _, e := range tapErrors {
-				fmt.Printf("  ⚠️  %s\n", e)
+				fmt.Printf("  %s\n", e)
 			}
 			return fmt.Errorf("tap upgrade failed for: %s", strings.Join(tapErrors, "; "))
 		}

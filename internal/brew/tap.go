@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -18,32 +17,6 @@ const (
 	HomebrewPrefixLinux  = "/usr/local"
 	HomebrewPrefixDarwin = "/opt/homebrew"
 )
-
-var (
-	homebrewPrefix   string
-	homebrewTapsDir  string
-	homebrewCellar   string
-	homebrewCaskroom string
-	detectErr        error
-	onceInit         sync.Once
-)
-
-func detectHomebrewPaths() {
-	onceInit.Do(func() {
-		goos := runtime.GOOS
-		if goos == "darwin" {
-			homebrewPrefix = "/opt/homebrew"
-			homebrewTapsDir = "/opt/homebrew/Library/Taps"
-			homebrewCellar = "/opt/homebrew/Cellar"
-			homebrewCaskroom = "/opt/homebrew/Caskroom"
-		} else {
-			homebrewPrefix = "/usr/local"
-			homebrewTapsDir = "/usr/local/Library/Taps"
-			homebrewCellar = "/usr/local/Cellar"
-			homebrewCaskroom = "/usr/local/Caskroom"
-		}
-	})
-}
 
 type Tap struct {
 	Name        string    `json:"name"`
@@ -63,27 +36,27 @@ type TapInfo struct {
 type TapManager struct {
 	registryPath string
 	taps         map[string]Tap
+	env          *Environment
 	mu           sync.RWMutex
 	onInvalid    func(event string)
 }
 
 func NewTapManager() (*TapManager, error) {
-	detectHomebrewPaths()
-
-	homeDir, err := os.UserHomeDir()
+	env, err := GetEnvironment()
 	if err != nil {
-		return nil, fmt.Errorf("could not get home directory: %w", err)
+		return nil, fmt.Errorf("could not get Homebrew environment: %w", err)
 	}
 
-	fastbrewDir := filepath.Join(homeDir, ".fastbrew")
-	if err := os.MkdirAll(fastbrewDir, 0755); err != nil {
-		return nil, fmt.Errorf("could not create fastbrew directory: %w", err)
+	_, cacheDir, err := GetFastbrewEnvironment()
+	if err != nil {
+		return nil, fmt.Errorf("could not get fastbrew directory: %w", err)
 	}
 
-	registryPath := filepath.Join(fastbrewDir, "taps.json")
+	registryPath := filepath.Join(cacheDir, "taps.json")
 	tm := &TapManager{
 		registryPath: registryPath,
 		taps:         make(map[string]Tap),
+		env:          env,
 	}
 
 	if err := tm.loadRegistry(); err != nil {
@@ -179,7 +152,7 @@ func normalizeTapRepoInput(repo string) (string, string, error) {
 	return "", "", fmt.Errorf("invalid tap repo format: %s (expected user/repo or full URL)", repo)
 }
 
-func tapLocalPath(repo string) string {
+func (tm *TapManager) tapLocalPath(repo string) string {
 	parts := strings.SplitN(repo, "/", 2)
 	if len(parts) != 2 {
 		return ""
@@ -190,13 +163,13 @@ func tapLocalPath(repo string) string {
 		repoName = "homebrew-" + repoName
 	}
 
-	return filepath.Join(homebrewTapsDir, user, repoName)
+	return filepath.Join(tm.env.TapsDir, user, repoName)
 }
 
 func (tm *TapManager) ListTaps() ([]Tap, error) {
 	taps := make([]Tap, 0)
 
-	entries, err := os.ReadDir(homebrewTapsDir)
+	entries, err := os.ReadDir(tm.env.TapsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			tm.mu.RLock()
@@ -214,7 +187,7 @@ func (tm *TapManager) ListTaps() ([]Tap, error) {
 			continue
 		}
 
-		userDir := filepath.Join(homebrewTapsDir, userEntry.Name())
+		userDir := filepath.Join(tm.env.TapsDir, userEntry.Name())
 		repoEntries, err := os.ReadDir(userDir)
 		if err != nil {
 			continue
@@ -297,7 +270,7 @@ func (tm *TapManager) Tap(repo string, full bool) error {
 		return fmt.Errorf("could not determine remote URL for %s", repo)
 	}
 
-	localPath := tapLocalPath(repoName)
+	localPath := tm.tapLocalPath(repoName)
 	if localPath == "" {
 		return fmt.Errorf("could not determine local path for %s", repo)
 	}
@@ -413,7 +386,7 @@ func (tm *TapManager) Untap(repo string, force bool) error {
 		return err
 	}
 
-	localPath := tapLocalPath(repoName)
+	localPath := tm.tapLocalPath(repoName)
 	if localPath == "" {
 		localPath = tm.findLocalPathForRepo(repoName)
 	}
@@ -480,7 +453,7 @@ func (tm *TapManager) getInstalledFromTap(tapPath string) ([]string, error) {
 				}
 				name := strings.TrimSuffix(entry.Name(), ".rb")
 
-				pkgPath := filepath.Join(homebrewCellar, name)
+				pkgPath := filepath.Join(tm.env.Cellar, name)
 				if _, err := os.Stat(pkgPath); err == nil {
 					installed = append(installed, name)
 				}
@@ -496,7 +469,7 @@ func (tm *TapManager) getInstalledFromTap(tapPath string) ([]string, error) {
 			}
 			name := strings.TrimSuffix(entry.Name(), ".rb")
 
-			caskPath := filepath.Join(homebrewCaskroom, name)
+			caskPath := filepath.Join(tm.env.Caskroom, name)
 			if _, err := os.Stat(caskPath); err == nil {
 				installed = append(installed, name)
 			}
@@ -512,7 +485,7 @@ func (tm *TapManager) GetTapInfo(repo string, installedOnly bool) (*TapInfo, err
 		return nil, err
 	}
 
-	localPath := tapLocalPath(repoName)
+	localPath := tm.tapLocalPath(repoName)
 	if localPath == "" {
 		localPath = tm.findLocalPathForRepo(repoName)
 	}
