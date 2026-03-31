@@ -487,6 +487,9 @@ func (c *Client) downloadAndCompress(url, path, label string) (bool, error) {
 	return true, nil
 }
 
+// GetSearchIndex returns the search index, using cached data when fresh.
+// It leverages LoadIndex() to avoid redundant JSON decoding when the index
+// is already loaded in memory.
 func (c *Client) GetSearchIndex() ([]SearchItem, error) {
 	if err := c.EnsureFreshJSONs(); err != nil {
 		return nil, err
@@ -501,8 +504,10 @@ func (c *Client) GetSearchIndex() ([]SearchItem, error) {
 	fPath := filepath.Join(cacheDir, "formula.json.zst")
 	cPath := filepath.Join(cacheDir, "cask.json.zst")
 
+	// Check if cached gob is fresh and load it
 	if isFreshAgainst(gobPath, fPath, cPath) {
 		if items, loadErr := loadSearchItemsFromGob(gobPath); loadErr == nil {
+			// Also ensure prefix index is fresh
 			if !isFreshAgainst(prefixIndexPath, fPath, cPath) {
 				prefixIdx := NewPrefixIndex()
 				if buildErr := prefixIdx.BuildIndex(items); buildErr == nil {
@@ -515,7 +520,8 @@ func (c *Client) GetSearchIndex() ([]SearchItem, error) {
 		}
 	}
 
-	idx, err := c.LoadRawIndex()
+	// Use LoadIndex() to leverage sync.Once caching and avoid redundant JSON decoding
+	idx, err := c.LoadIndex()
 	if err != nil {
 		return nil, err
 	}
@@ -528,6 +534,7 @@ func (c *Client) GetSearchIndex() ([]SearchItem, error) {
 		items = append(items, SearchItem{Name: cask.Token, Desc: cask.Desc, IsCask: true})
 	}
 
+	// Cache to gob for faster future loads
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(items); err == nil {
 		gobData := buf.Bytes()
@@ -542,6 +549,7 @@ func (c *Client) GetSearchIndex() ([]SearchItem, error) {
 		}
 	}
 
+	// Build and save prefix index
 	prefixIdx := NewPrefixIndex()
 	if err := prefixIdx.BuildIndex(items); err == nil {
 		if err := prefixIdx.Save(prefixIndexPath); err == nil && c.Verbose {

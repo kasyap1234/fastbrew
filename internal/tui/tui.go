@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tprogress "github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -33,6 +34,7 @@ var (
 	installedStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	spinnerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 	helpStyle         = list.DefaultStyles().HelpStyle.PaddingLeft(4).PaddingBottom(1)
+	searchInputStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Padding(0, 0, 0, 2)
 )
 
 const (
@@ -100,6 +102,11 @@ type model struct {
 	err     error
 	spinner spinner.Model
 
+	searchInput textinput.Model
+	searchQuery string
+	searching   bool
+	searchReady bool
+
 	jobActive   bool
 	jobVisible  bool
 	jobSource   string
@@ -127,6 +134,12 @@ type jobFinishedMsg struct {
 type jobWorkerStartedMsg struct{}
 type jobWorkerClosedMsg struct{}
 
+type searchResultMsg struct {
+	Items      []brew.SearchItem
+	Query      string
+	FromDaemon bool
+}
+
 type packageProgress struct {
 	Name      string
 	Phase     string
@@ -145,6 +158,14 @@ func InitialModel() *model {
 	s.Spinner = spinner.Dot
 	s.Style = spinnerStyle
 
+	ti := textinput.New()
+	ti.Placeholder = "Type to search packages..."
+	ti.Focus()
+	ti.CharLimit = 64
+	ti.Width = 40
+	ti.Prompt = "🔍 "
+	ti.PromptStyle = searchInputStyle
+
 	p := tprogress.New(tprogress.WithDefaultGradient())
 
 	delegate := itemDelegate{}
@@ -152,6 +173,7 @@ func InitialModel() *model {
 	l.Title = "FastBrew Packages"
 	l.Styles.Title = titleStyle
 	l.SetShowStatusBar(false)
+	l.SetFilteringEnabled(false)
 
 	return &model{
 		client:      client,
@@ -160,23 +182,18 @@ func InitialModel() *model {
 		jobPackages: make(map[string]*packageProgress),
 		spinner:     s,
 		progressBar: p,
+		searchInput: ti,
 	}
 }
 
 func (m *model) Init() tea.Cmd {
 	return tea.Batch(
 		m.spinner.Tick,
-		func() tea.Msg {
-			idx, err := m.client.LoadIndex()
-			if err != nil {
-				return err
-			}
-			return idx
-		},
+		textinput.Blink,
 		func() tea.Msg {
 			pkgs, err := m.client.ListInstalled()
 			if err != nil {
-				return err // Or ignore
+				return err
 			}
 			inst := make(map[string]bool)
 			for _, p := range pkgs {
@@ -196,27 +213,45 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
-	case tprogress.FrameMsg:
-		progressModel, cmd := m.progressBar.Update(msg)
-		m.progressBar = progressModel.(tprogress.Model)
-		return m, cmd
-
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
 
-		if msg.String() == "tab" {
-			if m.list.FilterState() != list.Filtering {
-				// We can toggle a view state here if we add a filter toggle or just let Bubbletea handle built in filtering (`/`). Fastbrew originally didn't have tab. Let's just leave it empty or add specific filtering logic later if needed.
+		if m.searchInput.Focused() {
+			switch msg.String() {
+			case "enter":
+				m.searchInput.Blur()
+				m.searchQuery = m.searchInput.Value()
+				m.searching = true
+				return m, m.performSearch(m.searchQuery)
+			case "esc":
+				m.searchInput.SetValue("")
+				m.searchInput.Blur()
+				m.searchQuery = ""
+				m.searching = false
+				m.searchReady = false
+				m.list.SetItems([]list.Item{})
+				m.list.Title = "FastBrew Packages"
+				return m, nil
 			}
+			var cmd tea.Cmd
+			m.searchInput, cmd = m.searchInput.Update(msg)
+			return m, cmd
+		}
+
+		if msg.String() == "/" {
+			m.searchInput.Focus()
+			m.searchInput.SetValue("")
+			var cmd tea.Cmd
+			m.searchInput, cmd = m.searchInput.Update(msg)
+			return m, cmd
 		}
 
 		if msg.String() == "enter" || msg.String() == "i" {
 			if m.jobActive {
 				return m, nil
 			}
-
 			if i, ok := m.list.SelectedItem().(item); ok {
 				return m, m.startJob(i.title, daemon.JobOperationInstall)
 			}
@@ -231,10 +266,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case tprogress.FrameMsg:
+		newModel, cmd := m.progressBar.Update(msg)
+		if pm, ok := newModel.(tprogress.Model); ok {
+			m.progressBar = pm
+		}
+		return m, cmd
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.progressBar.Width = msg.Width - 10
+		m.progressBar.Width = msg.Width - 20
 		m.updateListSize()
 
 	case error:
@@ -243,7 +285,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case installedMsg:
 		m.installed = msg
-		// If index is already loaded, refresh list
+		m.loaded = true
 		if m.index != nil {
 			return m, m.updateListItems()
 		}
@@ -252,6 +294,31 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.index = msg
 		m.loaded = true
 		return m, m.updateListItems()
+
+	case searchResultMsg:
+		m.searching = false
+		m.searchReady = true
+		var items []list.Item
+		for _, si := range msg.Items {
+			items = append(items, item{
+				title:     si.Name,
+				desc:      si.Desc,
+				installed: m.installed[si.Name],
+				isCask:    si.IsCask,
+			})
+		}
+		m.list.SetItems(items)
+		source := "local"
+		if msg.FromDaemon {
+			source = "daemon"
+		}
+		if msg.Query != "" {
+			m.list.Title = fmt.Sprintf("Search: '%s' (%s, %d results)", msg.Query, source, len(items))
+		} else {
+			m.list.Title = "FastBrew Packages"
+		}
+		m.updateListSize()
+		return m, nil
 
 	case jobWorkerStartedMsg:
 		return m, waitForJobMsg(m.jobEvents)
@@ -288,7 +355,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Installed != nil {
 			m.installed = msg.Installed
-			if m.index != nil {
+			if m.searchReady {
+				return m, m.refreshSearchResultsCmd()
+			} else if m.index != nil {
 				cmd := m.updateListItems()
 				m.updateListSize()
 				return m, cmd
@@ -304,6 +373,47 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
 	return m, cmd
+}
+
+func (m *model) performSearch(query string) tea.Cmd {
+	return func() tea.Msg {
+		daemonClient, daemonErr := daemonClientForTUI()
+		if daemonClient != nil && daemonErr == nil {
+			results, err := daemonClient.Search(query)
+			if err == nil {
+				return searchResultMsg{
+					Items:      results,
+					Query:      query,
+					FromDaemon: true,
+				}
+			}
+		}
+
+		prefixIdx, err := m.client.GetPrefixIndex()
+		if err != nil {
+			return err
+		}
+		matches := prefixIdx.SearchFuzzy(query)
+		items := prefixIdx.GetItems()
+		result := make([]brew.SearchItem, len(matches))
+		for i, match := range matches {
+			result[i] = items[match.Index]
+		}
+		return searchResultMsg{
+			Items:      result,
+			Query:      query,
+			FromDaemon: false,
+		}
+	}
+}
+
+// refreshSearchResultsCmd returns a tea.Cmd that safely refreshes search results.
+// This follows Bubble Tea's message-passing architecture instead of direct state mutation.
+func (m *model) refreshSearchResultsCmd() tea.Cmd {
+	if m.searchQuery == "" {
+		return nil
+	}
+	return m.performSearch(m.searchQuery)
 }
 
 func (m *model) startJob(target string, operation string) tea.Cmd {
@@ -367,18 +477,50 @@ func (m *model) View() string {
 		return fmt.Sprintf("Error: %v", m.err)
 	}
 	if !m.loaded {
-		return fmt.Sprintf("\n\n   %s Loading FastBrew Index...", m.spinner.View())
+		return fmt.Sprintf("\n\n   %s Loading installed packages...", m.spinner.View())
+	}
+
+	var parts []string
+
+	searchLine := m.searchInput.View()
+	parts = append(parts, searchLine)
+
+	if m.searching {
+		parts = append(parts, fmt.Sprintf("   %s Searching...", m.spinner.View()))
 	}
 
 	view := m.list.View()
+	parts = append(parts, view)
+
 	if m.jobVisible {
-		view = view + "\n" + m.renderJobPanel()
+		parts = append(parts, m.renderJobPanel())
 	}
-	return docStyle.Render(view)
+
+	return docStyle.Render(strings.Join(parts, "\n"))
 }
 
+// Start launches the TUI with terminal capability detection for graceful degradation.
+// It checks terminal capabilities and adjusts the UI accordingly.
 func Start() error {
-	p := tea.NewProgram(InitialModel(), tea.WithAltScreen())
+	// Check terminal capabilities first
+	if err := CheckTerminal(); err != nil {
+		return err
+	}
+
+	caps := DetectTerminalCapabilities()
+
+	// Configure program options based on terminal capabilities
+	var opts []tea.ProgramOption
+	if caps.CanUseAltScreen() {
+		opts = append(opts, tea.WithAltScreen())
+	}
+
+	// Add mouse support for capable terminals
+	if caps.CanUseFancyUI() {
+		opts = append(opts, tea.WithMouseCellMotion())
+	}
+
+	p := tea.NewProgram(InitialModel(), opts...)
 	_, err := p.Run()
 	return err
 }
@@ -394,7 +536,7 @@ func (m *model) updateListSize() {
 		panel = jobPanelHeight
 	}
 
-	listHeight := m.height - v - panel
+	listHeight := m.height - v - panel - 2
 	if listHeight < 6 {
 		listHeight = 6
 	}
@@ -402,6 +544,7 @@ func (m *model) updateListSize() {
 	if listWidth < 20 {
 		listWidth = 20
 	}
+	m.searchInput.Width = listWidth - 4
 	m.list.SetSize(listWidth, listHeight)
 }
 
@@ -467,12 +610,11 @@ func (m *model) renderJobPanel() string {
 	var lines []string
 	summary := fmt.Sprintf("Job %s (%s): %s", m.jobStatus, m.jobSource, m.jobTarget)
 
-	// Add styling to summary based on status
-	statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true) // Blue for progress
+	statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
 	if m.jobStatus == daemon.JobStatusSucceeded {
-		statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true) // Green for success
+		statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
 	} else if m.jobStatus == daemon.JobStatusFailed {
-		statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true) // Red for failed
+		statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 	}
 
 	lines = append(lines, statusStyle.Render(summary))
@@ -489,7 +631,6 @@ func (m *model) renderJobPanel() string {
 				break
 			}
 
-			// Show progress bar instead of text for percentage
 			bar := m.progressBar.ViewAs(row.Percent / 100)
 			if row.Total <= 0 {
 				bar = m.progressBar.ViewAs(0)

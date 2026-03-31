@@ -134,16 +134,34 @@ func (s *Server) Close() error {
 	return closeErr
 }
 
+// Warmup preloads critical data into memory and cache to ensure fast
+// response times for common operations. This includes:
+// - Package index (formulae and casks)
+// - Prefix index for fuzzy search
+// - Installed packages list
+// - Outdated packages (with shorter TTL for freshness)
 func (s *Server) Warmup() error {
+	// Load main index (formulae + casks) - this uses sync.Once for efficiency
 	if _, err := s.client.LoadIndex(); err != nil {
-		return err
+		return fmt.Errorf("warmup: failed to load index: %w", err)
 	}
+
+	// Build prefix index for fast fuzzy search
 	if _, err := s.client.GetPrefixIndex(); err != nil {
-		return err
+		return fmt.Errorf("warmup: failed to build prefix index: %w", err)
 	}
+
+	// Preload installed packages (very common operation)
 	if _, err := s.cache.loadInstalled(s.client.ListInstalledNative); err != nil {
-		return err
+		return fmt.Errorf("warmup: failed to load installed packages: %w", err)
 	}
+
+	// Preload outdated packages (common for upgrade checks)
+	// This runs in background since it's less critical
+	go func() {
+		_, _ = s.cache.loadOutdated(s.client.GetOutdated)
+	}()
+
 	s.cache.markWarmup()
 	s.touch()
 	return nil
