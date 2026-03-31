@@ -26,26 +26,28 @@ type Service struct {
 	LastExitCode int
 }
 
+// LaunchdManager manages macOS services via launchd
 type LaunchdManager struct {
 	userAgentPaths   []string
 	systemAgentPaths []string
+	scope            ServiceScope
 	parser           *PlistParser
 	runner           CommandRunner
 }
 
 func NewLaunchdManager() *LaunchdManager {
+	return NewLaunchdManagerWithScope(ScopeAll)
+}
+
+func NewLaunchdManagerWithScope(scope ServiceScope) *LaunchdManager {
 	homeDir, _ := os.UserHomeDir()
 
 	return &LaunchdManager{
-		userAgentPaths: []string{
-			filepath.Join(homeDir, "Library", "LaunchAgents"),
-		},
-		systemAgentPaths: []string{
-			"/Library/LaunchAgents",
-			"/Library/LaunchDaemons",
-		},
-		parser: NewPlistParser(),
-		runner: &DefaultCommandRunner{},
+		userAgentPaths:   []string{filepath.Join(homeDir, "Library", "LaunchAgents")},
+		systemAgentPaths: []string{"/Library/LaunchAgents", "/Library/LaunchDaemons"},
+		scope:            scope,
+		parser:           NewPlistParser(),
+		runner:           &DefaultCommandRunner{},
 	}
 }
 
@@ -53,6 +55,19 @@ func NewLaunchdManagerWithRunner(runner CommandRunner) *LaunchdManager {
 	mgr := NewLaunchdManager()
 	mgr.runner = runner
 	return mgr
+}
+
+func (m *LaunchdManager) launchctlDomain() string {
+	switch m.scope {
+	case ScopeUser:
+		return "gui/0"
+	case ScopeSystem:
+		return "system"
+	case ScopeAll:
+		return "gui/0"
+	default:
+		return "gui/0"
+	}
 }
 
 func (m *LaunchdManager) ListServices() ([]Service, error) {
@@ -268,12 +283,13 @@ func (m *LaunchdManager) Start(serviceName string) error {
 		return ServiceNotFoundError{Name: serviceName}
 	}
 
-	_, err := m.runner.Run("launchctl", "load", "-w", plistPath)
+	domain := m.launchctlDomain()
+	_, err := m.runner.Run("launchctl", "bootstrap", domain, plistPath)
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return LaunchctlError{Command: "load", Cause: err, Output: string(exitErr.Stderr)}
+			return LaunchctlError{Command: "bootstrap", Cause: err, Output: string(exitErr.Stderr)}
 		}
-		return LaunchctlError{Command: "load", Cause: err}
+		return LaunchctlError{Command: "bootstrap", Cause: err}
 	}
 	return nil
 }
@@ -284,12 +300,13 @@ func (m *LaunchdManager) Stop(serviceName string) error {
 		return ServiceNotFoundError{Name: serviceName}
 	}
 
-	_, err := m.runner.Run("launchctl", "unload", plistPath)
+	domain := m.launchctlDomain()
+	_, err := m.runner.Run("launchctl", "bootout", domain, plistPath)
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return LaunchctlError{Command: "unload", Cause: err, Output: string(exitErr.Stderr)}
+			return LaunchctlError{Command: "bootout", Cause: err, Output: string(exitErr.Stderr)}
 		}
-		return LaunchctlError{Command: "unload", Cause: err}
+		return LaunchctlError{Command: "bootout", Cause: err}
 	}
 	return nil
 }
@@ -304,33 +321,9 @@ func (m *LaunchdManager) Restart(serviceName string) error {
 }
 
 func (m *LaunchdManager) Enable(serviceName string) error {
-	plistPath := m.findPlistPath(serviceName)
-	if plistPath == "" {
-		return ServiceNotFoundError{Name: serviceName}
-	}
-
-	_, err := m.runner.Run("launchctl", "load", "-w", plistPath)
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return LaunchctlError{Command: "load", Cause: err, Output: string(exitErr.Stderr)}
-		}
-		return LaunchctlError{Command: "load", Cause: err}
-	}
-	return nil
+	return m.Start(serviceName)
 }
 
 func (m *LaunchdManager) Disable(serviceName string) error {
-	plistPath := m.findPlistPath(serviceName)
-	if plistPath == "" {
-		return ServiceNotFoundError{Name: serviceName}
-	}
-
-	_, err := m.runner.Run("launchctl", "unload", "-w", plistPath)
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return LaunchctlError{Command: "unload", Cause: err, Output: string(exitErr.Stderr)}
-		}
-		return LaunchctlError{Command: "unload", Cause: err}
-	}
-	return nil
+	return m.Stop(serviceName)
 }

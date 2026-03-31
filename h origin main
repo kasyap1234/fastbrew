@@ -1,0 +1,3 @@
+[33mdfb1cf1[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m perf: optimize fastbrew with TUI fixes, index caching, and terminal detection
+[33m6f40d96[m[33m ([m[1;33mtag: [m[1;33mv1.7.0[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m feat: implement pure native Homebrew compatibility
+[33md71729c[m[33m ([m[1;33mtag: [m[1;33mv1.6.0[m[33m)[m feat: add native-first tap installation with --strict-native flag

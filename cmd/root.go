@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fastbrew/internal/brew"
+	"fastbrew/internal/tui"
 	"fmt"
 	"os"
 
@@ -23,7 +24,6 @@ var rootCmd = &cobra.Command{
 	Long: `FastBrew is a high-performance native implementation of Homebrew.
 It provides parallel execution, instant search, and optimized package management.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// Handle --* flags like brew does
 		if showPrefix {
 			env, err := brew.GetEnvironment()
 			if err != nil {
@@ -57,7 +57,6 @@ It provides parallel execution, instant search, and optimized package management
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
-			// Print environment variables in brew format
 			fmt.Printf("HOMEBREW_PREFIX=%s\n", env.HomebrewPrefix)
 			fmt.Printf("HOMEBREW_CELLAR=%s\n", env.HomebrewCellar)
 			fmt.Printf("HOMEBREW_REPOSITORY=%s\n", env.HomebrewRepository)
@@ -74,16 +73,19 @@ It provides parallel execution, instant search, and optimized package management
 			return
 		}
 		if showVersionFlag {
-			// Just show FastBrew version - don't call brew
 			fmt.Println(Version)
 			return
 		}
 
-		// When no args provided, show help like brew does
 		if len(args) == 0 {
-			cmd.Help()
+			if err := tui.Start(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error starting TUI: %v\n", err)
+				os.Exit(1)
+			}
 			return
 		}
+
+		cmd.Help()
 	},
 }
 

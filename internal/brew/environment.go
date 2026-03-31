@@ -3,6 +3,7 @@ package brew
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -49,7 +50,17 @@ func detectPrefix() string {
 		return prefix
 	}
 
-	// 2. Check known platform locations
+	// 2. Try `brew --prefix` as a reliable cross-platform fallback
+	if prefix, err := exec.Command("brew", "--prefix").Output(); err == nil {
+		p := strings.TrimSpace(string(prefix))
+		if p != "" {
+			if _, statErr := os.Stat(p); statErr == nil {
+				return p
+			}
+		}
+	}
+
+	// 3. Check known platform locations
 	switch runtime.GOOS {
 	case "darwin":
 		// macOS ARM
@@ -66,6 +77,14 @@ func detectPrefix() string {
 	case "linux":
 		if _, err := os.Stat("/home/linuxbrew/.linuxbrew"); err == nil {
 			return "/home/linuxbrew/.linuxbrew"
+		}
+		// Common user-level Linuxbrew installs
+		home, homeErr := os.UserHomeDir()
+		if homeErr == nil {
+			userPrefix := filepath.Join(home, ".linuxbrew")
+			if _, err := os.Stat(userPrefix); err == nil {
+				return userPrefix
+			}
 		}
 		// Legacy Linuxbrew
 		if _, err := os.Stat("/usr/local"); err == nil {

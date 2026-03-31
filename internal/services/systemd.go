@@ -11,25 +11,28 @@ import (
 type SystemdManager struct {
 	userServicePaths   []string
 	systemServicePaths []string
+	scope              ServiceScope
 	parser             *ServiceFileParser
 	runner             CommandRunner
 }
 
 // NewSystemdManager creates a new SystemdManager with default paths
 func NewSystemdManager() *SystemdManager {
+	return NewSystemdManagerWithScope(ScopeAll)
+}
+
+// NewSystemdManagerWithScope creates a SystemdManager with the given scope
+func NewSystemdManagerWithScope(scope ServiceScope) *SystemdManager {
 	homeDir, _ := os.UserHomeDir()
 
-	return &SystemdManager{
-		userServicePaths: []string{
-			filepath.Join(homeDir, ".config", "systemd", "user"),
-		},
-		systemServicePaths: []string{
-			"/etc/systemd/system",
-			"/usr/lib/systemd/system",
-		},
-		parser: NewServiceFileParser(),
-		runner: &DefaultCommandRunner{},
+	mgr := &SystemdManager{
+		userServicePaths:   []string{filepath.Join(homeDir, ".config", "systemd", "user")},
+		systemServicePaths: []string{"/etc/systemd/system", "/usr/lib/systemd/system"},
+		scope:              scope,
+		parser:             NewServiceFileParser(),
+		runner:             &DefaultCommandRunner{},
 	}
+	return mgr
 }
 
 // NewSystemdManagerWithRunner creates a new SystemdManager with a custom command runner (for testing)
@@ -37,6 +40,19 @@ func NewSystemdManagerWithRunner(runner CommandRunner) *SystemdManager {
 	mgr := NewSystemdManager()
 	mgr.runner = runner
 	return mgr
+}
+
+func (m *SystemdManager) systemctlScope() string {
+	switch m.scope {
+	case ScopeUser:
+		return "--user"
+	case ScopeSystem:
+		return ""
+	case ScopeAll:
+		return "--user"
+	default:
+		return "--user"
+	}
 }
 
 // ListServices returns a list of all Homebrew systemd services
@@ -85,12 +101,38 @@ func (m *SystemdManager) GetStatus(serviceName string) (Service, error) {
 func (m *SystemdManager) findServiceFiles() ([]string, error) {
 	var paths []string
 
-	for _, dir := range m.userServicePaths {
-		files, err := m.scanServiceDirectory(dir)
-		if err != nil {
-			continue
+	switch m.scope {
+	case ScopeUser:
+		for _, dir := range m.userServicePaths {
+			files, err := m.scanServiceDirectory(dir)
+			if err != nil {
+				continue
+			}
+			paths = append(paths, files...)
 		}
-		paths = append(paths, files...)
+	case ScopeSystem:
+		for _, dir := range m.systemServicePaths {
+			files, err := m.scanServiceDirectory(dir)
+			if err != nil {
+				continue
+			}
+			paths = append(paths, files...)
+		}
+	case ScopeAll:
+		for _, dir := range m.userServicePaths {
+			files, err := m.scanServiceDirectory(dir)
+			if err != nil {
+				continue
+			}
+			paths = append(paths, files...)
+		}
+		for _, dir := range m.systemServicePaths {
+			files, err := m.scanServiceDirectory(dir)
+			if err != nil {
+				continue
+			}
+			paths = append(paths, files...)
+		}
 	}
 
 	return paths, nil
@@ -227,84 +269,59 @@ func (m *SystemdManager) IsSystemService(servicePath string) bool {
 	return false
 }
 
-func (m *SystemdManager) Start(serviceName string) error {
+func (m *SystemdManager) serviceAction(action, serviceName string) error {
 	servicePath := m.findServiceFilePath(serviceName)
 	if servicePath == "" {
 		return ServiceNotFoundError{Name: serviceName}
 	}
 
-	_, err := m.runner.Run("systemctl", "--user", "start", serviceName)
+	isUser := m.IsUserService(servicePath)
+	isSystem := m.IsSystemService(servicePath)
+
+	var scope string
+	switch {
+	case isUser:
+		scope = "--user"
+	case isSystem:
+		scope = ""
+	default:
+		scope = m.systemctlScope()
+	}
+
+	var args []string
+	if scope != "" {
+		args = append(args, scope)
+	}
+	args = append(args, action, serviceName)
+
+	_, err := m.runner.Run("systemctl", args...)
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return SystemctlError{Command: "start", Scope: "--user", Cause: err, Output: string(exitErr.Stderr)}
+			return SystemctlError{Command: action, Scope: scope, Cause: err, Output: string(exitErr.Stderr)}
 		}
-		return SystemctlError{Command: "start", Scope: "--user", Cause: err}
+		return SystemctlError{Command: action, Scope: scope, Cause: err}
 	}
 	return nil
+}
+
+func (m *SystemdManager) Start(serviceName string) error {
+	return m.serviceAction("start", serviceName)
 }
 
 func (m *SystemdManager) Stop(serviceName string) error {
-	servicePath := m.findServiceFilePath(serviceName)
-	if servicePath == "" {
-		return ServiceNotFoundError{Name: serviceName}
-	}
-
-	_, err := m.runner.Run("systemctl", "--user", "stop", serviceName)
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return SystemctlError{Command: "stop", Scope: "--user", Cause: err, Output: string(exitErr.Stderr)}
-		}
-		return SystemctlError{Command: "stop", Scope: "--user", Cause: err}
-	}
-	return nil
+	return m.serviceAction("stop", serviceName)
 }
 
 func (m *SystemdManager) Restart(serviceName string) error {
-	servicePath := m.findServiceFilePath(serviceName)
-	if servicePath == "" {
-		return ServiceNotFoundError{Name: serviceName}
-	}
-
-	_, err := m.runner.Run("systemctl", "--user", "restart", serviceName)
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return SystemctlError{Command: "restart", Scope: "--user", Cause: err, Output: string(exitErr.Stderr)}
-		}
-		return SystemctlError{Command: "restart", Scope: "--user", Cause: err}
-	}
-	return nil
+	return m.serviceAction("restart", serviceName)
 }
 
 func (m *SystemdManager) Enable(serviceName string) error {
-	servicePath := m.findServiceFilePath(serviceName)
-	if servicePath == "" {
-		return ServiceNotFoundError{Name: serviceName}
-	}
-
-	_, err := m.runner.Run("systemctl", "--user", "enable", serviceName)
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return SystemctlError{Command: "enable", Scope: "--user", Cause: err, Output: string(exitErr.Stderr)}
-		}
-		return SystemctlError{Command: "enable", Scope: "--user", Cause: err}
-	}
-	return nil
+	return m.serviceAction("enable", serviceName)
 }
 
 func (m *SystemdManager) Disable(serviceName string) error {
-	servicePath := m.findServiceFilePath(serviceName)
-	if servicePath == "" {
-		return ServiceNotFoundError{Name: serviceName}
-	}
-
-	_, err := m.runner.Run("systemctl", "--user", "disable", serviceName)
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return SystemctlError{Command: "disable", Scope: "--user", Cause: err, Output: string(exitErr.Stderr)}
-		}
-		return SystemctlError{Command: "disable", Scope: "--user", Cause: err}
-	}
-	return nil
+	return m.serviceAction("disable", serviceName)
 }
 
 // UserServicePathError indicates an error with the user service directory

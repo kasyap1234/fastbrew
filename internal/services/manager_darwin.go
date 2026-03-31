@@ -8,20 +8,19 @@ import (
 )
 
 func NewServiceManager() ServiceManager {
-	return NewLaunchdManager()
+	return NewLaunchdManagerWithScope(ScopeAll)
 }
 
 func newUserScopeManager() ServiceManager {
-	mgr := NewLaunchdManager()
-	mgr.userAgentPaths = []string{}
+	mgr := NewLaunchdManagerWithScope(ScopeUser)
 	homeDir, _ := getHomeDir()
-	mgr.userAgentPaths = append(mgr.userAgentPaths, filepath.Join(homeDir, "Library", "LaunchAgents"))
+	mgr.userAgentPaths = []string{filepath.Join(homeDir, "Library", "LaunchAgents")}
 	mgr.systemAgentPaths = []string{}
 	return mgr
 }
 
 func newSystemScopeManager() ServiceManager {
-	mgr := NewLaunchdManager()
+	mgr := NewLaunchdManagerWithScope(ScopeSystem)
 	mgr.userAgentPaths = []string{}
 	mgr.systemAgentPaths = []string{
 		"/Library/LaunchDaemons",
@@ -30,7 +29,7 @@ func newSystemScopeManager() ServiceManager {
 }
 
 func newAllScopeManager() ServiceManager {
-	return NewLaunchdManager()
+	return NewLaunchdManagerWithScope(ScopeAll)
 }
 
 func getHomeDir() (string, error) {

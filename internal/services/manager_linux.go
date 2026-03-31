@@ -8,20 +8,19 @@ import (
 )
 
 func NewServiceManager() ServiceManager {
-	return NewSystemdManager()
+	return NewSystemdManagerWithScope(ScopeAll)
 }
 
 func newUserScopeManager() ServiceManager {
-	mgr := NewSystemdManager()
-	mgr.userServicePaths = []string{}
+	mgr := NewSystemdManagerWithScope(ScopeUser)
 	homeDir, _ := os.UserHomeDir()
-	mgr.userServicePaths = append(mgr.userServicePaths, filepath.Join(homeDir, ".config", "systemd", "user"))
+	mgr.userServicePaths = []string{filepath.Join(homeDir, ".config", "systemd", "user")}
 	mgr.systemServicePaths = []string{}
 	return mgr
 }
 
 func newSystemScopeManager() ServiceManager {
-	mgr := NewSystemdManager()
+	mgr := NewSystemdManagerWithScope(ScopeSystem)
 	mgr.userServicePaths = []string{}
 	mgr.systemServicePaths = []string{
 		"/etc/systemd/system",
@@ -31,5 +30,5 @@ func newSystemScopeManager() ServiceManager {
 }
 
 func newAllScopeManager() ServiceManager {
-	return NewSystemdManager()
+	return NewSystemdManagerWithScope(ScopeAll)
 }
